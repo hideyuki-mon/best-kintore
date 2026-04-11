@@ -174,7 +174,7 @@ button.linkish {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 240px;
+  max-height: min(52vh, 360px);
   overflow: auto;
 }
 
