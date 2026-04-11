@@ -1,41 +1,46 @@
 # ベスト筋トレ
 
-友人と一緒に、「健康・長く続くこと」を最優先した筋トレの考え方・メニュー・振り返りを整理するリポジトリです。
+**そのときの条件に合った筋トレメニューを提示するスマホアプリ**を、友人と GitHub で共同開発するリポジトリです。
+
+最優先する価値は **健康・長く続くこと** です。
+
+## 何を作るか（概要）
+
+- 条件（例：**自宅かジムか**、**使える器具**、**使いたい時間** など）から、適したメニューを提示する。
+- **ジム**：店舗の検索・登録。店舗に紐づく器具情報を参照し、その条件でメニューを組めるようにする（詳細は [docs/product.md](docs/product.md)）。
 
 ## GitHub 上の名前について
 
-GitHub の **Repository name**（URL に使われる部分）は英数字とハイフンが無難です。例: `best-kintore`  
-表示はこの README のタイトルや、リポジトリページの **About** の説明文で「ベスト筋トレ」と書けば問題ありません。
+リポジトリ URL 用の名前は英数字とハイフンが無難です（例: `best-kintore`）。  
+画面や説明文では「ベスト筋トレ」と表記して問題ありません。
 
-## このリポジトリの使い方（ざっくり）
+## リポジトリの使い方
 
 | 場所 | 役割 |
 |------|------|
-| この README | 目的と全体の案内 |
+| この README | プロジェクトの入口 |
+| [docs/product.md](docs/product.md) | プロダクト方針・スコープ |
 | [docs/decisions.md](docs/decisions.md) | 二人で「こう決めた」という合意だけを日付付きで残す |
-| **Issues** | 議論・提案・週の振り返り（ラベル例: `前提` `メニュー` `振り返り`） |
+| **Issues** | 仕様・技術スタック・画面の議論（テンプレ「前提・振り返り」あり） |
 
-## Git がはじめての場合（最短ルート）
+## Git がはじめての場合
 
-1. [GitHub](https://github.com) でアカウントを作り、**New repository** で空のリポジトリを作成する（名前は例: `best-kintore`）。
-2. 次のどちらかがおすすめです。
-   - **[GitHub Desktop](https://desktop.github.com/)** を入れて「Add」→ このフォルダを選び、Publish でリポジトリに載せる（画面操作が中心）。
-   - または PC に [Git for Windows](https://git-scm.com/download/win) を入れたうえで、ターミナルでこのフォルダに移動して次を実行する。
+1. [GitHub](https://github.com) でアカウントを用意する。
+2. リポジトリを **clone** するか、[GitHub Desktop](https://desktop.github.com/) でこのリポジトリを開く。
+3. 変更を **commit** して **push** する（Desktop なら「Commit to main」→「Push origin」）。
+
+コマンドで remote を自分用に差し替える例:
 
 ```bash
-git init
-git add .
-git commit -m "最初のコミット: README とテンプレ"
-git branch -M main
-git remote add origin https://github.com/<あなたのユーザー名>/best-kintore.git
-git push -u origin main
+git clone https://github.com/<ユーザー名>/best-kintore.git
+cd best-kintore
 ```
 
-`<あなたのユーザー名>` とリポジトリ名は、GitHub で作ったものに合わせてください。
-
-友人を **Collaborator** に招待すると、同じリポジトリで Issue や編集ができます（リポジトリの **Settings → Collaborators**）。
+友人を **Settings → Collaborators** から招待すると、共同編集できます。
 
 ## 最初に開くとよい Issue
 
-タイトル例: **前提：トレ環境・時間・週回数を決める**  
-テンプレート「前提・振り返り」から作ると、本文の項目が自動で入ります。
+- **技術**: スマホ向けフレームワーク（Expo / React Native / Flutter など）の候補と MVP 範囲
+- **データ**: 店舗・器具マスタの第1版（静的 JSON から始めるか、BaaS か）
+
+Issue テンプレート「前提・振り返り」から作成できます。
