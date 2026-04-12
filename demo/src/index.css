@@ -96,6 +96,7 @@ button {
   cursor: pointer;
   border: none;
   border-radius: var(--radius);
+  color: var(--text);
 }
 
 button.big {
@@ -182,17 +183,26 @@ button.row {
   width: 100%;
   text-align: left;
   padding: 12px;
-  background: #12151c;
+  background: #1e2430;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+  color: #f2f5fa;
+}
+
+button.row:hover {
+  background: #252b3a;
+  border-color: #3d4a63;
 }
 
 .row-title {
   font-weight: 650;
+  font-size: 0.94rem;
+  line-height: 1.35;
+  color: #f7f9fc;
 }
 
 .row-meta {
