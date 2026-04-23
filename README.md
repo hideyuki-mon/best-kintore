@@ -33,6 +33,7 @@ npm run dev
 | この README | プロジェクトの入口 |
 | [docs/product.md](docs/product.md) | プロダクト方針・スコープ |
 | [docs/decisions.md](docs/decisions.md) | 二人で「こう決めた」という合意だけを日付付きで残す |
+| [docs/github-branch-protection.md](docs/github-branch-protection.md) | `main` の Branch Protection（Rulesets / Classic）の運用手順 |
 | **Issues** | 仕様・技術スタック・画面の議論（テンプレ「前提・振り返り」あり） |
 
 ## Git がはじめての場合
@@ -54,6 +55,8 @@ cd best-kintore
 
 - **Branch Protection Rules（ブランチ保護ルール）** は、`main` などのブランチを守るための設定です。レビュー承認がないとマージできない、といったルールを GitHub 側で強制できます。
 - **Auto Merge（オートマージ）** は、条件を満たしたプルリクエストを自動でマージする**別の機能**です。保護ルールそのものではなく、承認やチェックが揃ったあとにマージ作業を省くためのものです。必要に応じて保護ルールと組み合わせて使います。
+
+実際の有効化は GitHub の **Settings** から行います。手順と推奨トグルは [docs/github-branch-protection.md](docs/github-branch-protection.md) を参照してください。
 
 ## 最初に開くとよい Issue
 

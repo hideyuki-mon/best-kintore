@@ -8,6 +8,4 @@ Issue などで話し合ったあと、**ここには結論だけ**を短く残�
 
 ---
 
-<!-- 例:
-- **2026-04-11** — 週2回から始め、全身をおおまかにカバーする（続けることを優先）
--->
+- **2026-04-24** — `main` に Ruleset を有効化（PR 必須・承認1・強制 push 禁止）。変更は PR 経由に統一（詳細は [github-branch-protection.md](github-branch-protection.md)）。
