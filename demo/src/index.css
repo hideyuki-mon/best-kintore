@@ -273,6 +273,10 @@ button.row:hover {
   margin-bottom: 14px;
 }
 
+.segment.col {
+  grid-template-columns: 1fr;
+}
+
 .seg {
   padding: 10px 6px;
   background: #12151c;
@@ -285,6 +289,12 @@ button.row:hover {
   border-color: var(--accent);
   color: var(--text);
   background: var(--accent-dim);
+}
+
+.seg.full {
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
 }
 
 .summary {
