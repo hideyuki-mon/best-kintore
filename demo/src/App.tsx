@@ -1,100 +1,19 @@
 import { useMemo, useState } from 'react'
 import { JEXER_INITIAL_GYMS, JEXER_STORE_COUNT } from './data/jexerStores'
+import {
+  ALL_EQUIPMENT,
+  BODY_STATE_LABEL,
+  pickExercises,
+  type BodyState,
+} from './lib/menu'
 import type { Equipment, Gym } from './types/gym'
 
 type Place = 'home' | 'gym'
 
-type Step = 'place' | 'gym' | 'homeEquip' | 'time' | 'result'
-
-type Exercise = {
-  id: string
-  name: string
-  needs: Equipment[]
-  sets: string
-  note: string
-}
+type Step = 'place' | 'gym' | 'homeEquip' | 'body' | 'time' | 'result'
 
 /** 初期ジムはジェクサー系47件（FIT Search 掲載件数に合わせた公開住所ベース）。器具はデモ推定。 */
 const INITIAL_GYMS: Gym[] = JEXER_INITIAL_GYMS
-
-const EXERCISES: Exercise[] = [
-  {
-    id: 'e1',
-    name: 'スクワット（自重）',
-    needs: ['自重'],
-    sets: '3×12〜15',
-    note: '可動域は無理なく。膝はつま先と同じ向きに。',
-  },
-  {
-    id: 'e2',
-    name: 'プッシュアップ',
-    needs: ['自重'],
-    sets: '3×8〜12',
-    note: '体幹をまっすぐに。膝つきでも可。',
-  },
-  {
-    id: 'e3',
-    name: 'ルーマニアン・デッドリフト',
-    needs: ['バーベル', 'ラック'],
-    sets: '3×8',
-    note: '背中はニュートラル。下背に違和感があれば中止。',
-  },
-  {
-    id: 'e4',
-    name: 'ゴブレット・スクワット',
-    needs: ['ダンベル'],
-    sets: '3×10',
-    note: '肘は内股に落とし、胸は張る。',
-  },
-  {
-    id: 'e5',
-    name: 'ラットプルダウン（ケーブル）',
-    needs: ['ケーブル'],
-    sets: '3×10〜12',
-    note: '肩甲骨を下げてから引くイメージ。',
-  },
-  {
-    id: 'e6',
-    name: 'レッグプレス',
-    needs: ['マシン'],
-    sets: '3×12',
-    note: '腰をシートから浮かさない。',
-  },
-  {
-    id: 'e7',
-    name: 'ブルガリアン・スプリット・スクワット',
-    needs: ['ダンベル', 'ヨガマット'],
-    sets: '各脚 3×8',
-    note: '前脚の膝はつま先より大きく前に出さない。',
-  },
-  {
-    id: 'e8',
-    name: 'プランク',
-    needs: ['ヨガマット'],
-    sets: '3×30〜45秒',
-    note: '腰を落とさない。息は止めない。',
-  },
-]
-
-const ALL_EQUIPMENT: Equipment[] = [
-  '自重',
-  'ダンベル',
-  'ヨガマット',
-  'ラック',
-  'バーベル',
-  'ケーブル',
-  'マシン',
-]
-
-function canDo(ex: Exercise, available: Set<Equipment>): boolean {
-  return ex.needs.every((n) => available.has(n))
-}
-
-function pickExercises(available: Set<Equipment>, minutes: number): Exercise[] {
-  const ok = EXERCISES.filter((e) => canDo(e, available))
-  const cap = minutes <= 25 ? 3 : minutes <= 45 ? 5 : 7
-  return ok.slice(0, cap)
-}
 
 function uid(): string {
   return `id-${Math.random().toString(36).slice(2, 9)}`
@@ -110,6 +29,7 @@ export default function App() {
   const [newGymName, setNewGymName] = useState('')
   const [newGymEquip, setNewGymEquip] = useState<Equipment[]>(['自重', 'ダンベル'])
   const [homeEquip, setHomeEquip] = useState<Equipment[]>(['自重', 'ヨガマット'])
+  const [bodyState, setBodyState] = useState<BodyState>('normal')
   const [minutes, setMinutes] = useState(40)
 
   const filteredGyms = useMemo(() => {
@@ -138,8 +58,8 @@ export default function App() {
   }, [place, selectedGym, homeEquip])
 
   const menu = useMemo(
-    () => pickExercises(availableEquipment, minutes),
-    [availableEquipment, minutes],
+    () => pickExercises(availableEquipment, minutes, bodyState),
+    [availableEquipment, minutes, bodyState],
   )
 
   function reset() {
@@ -151,6 +71,7 @@ export default function App() {
     setNewGymName('')
     setNewGymEquip(['自重', 'ダンベル'])
     setHomeEquip(['自重', 'ヨガマット'])
+    setBodyState('normal')
     setMinutes(40)
   }
 
@@ -175,7 +96,7 @@ export default function App() {
     setSelectedGym(g)
     setShowRegister(false)
     setNewGymName('')
-    setStep('time')
+    setStep('body')
   }
 
   function toggleHome(eq: Equipment) {
@@ -241,7 +162,7 @@ export default function App() {
                     className="row"
                     onClick={() => {
                       setSelectedGym(g)
-                      setStep('time')
+                      setStep('body')
                     }}
                   >
                     <span className="row-title">{g.name}</span>
@@ -306,7 +227,7 @@ export default function App() {
             <h2>自宅で使えるもの</h2>
             <p className="hint">デモ用のチェックです。選んだ器具だけがメニュー条件に入ります。</p>
             <div className="chips">
-              {(['自重', 'ダンベル', 'ヨガマット'] as const).map((eq) => (
+              {ALL_EQUIPMENT.map((eq) => (
                 <label key={eq} className="chip">
                   <input
                     type="checkbox"
@@ -320,11 +241,42 @@ export default function App() {
             <button
               type="button"
               className="primary full"
-              onClick={() => setStep('time')}
+              onClick={() => setStep('body')}
             >
               次へ
             </button>
             <button type="button" className="ghost full mt" onClick={() => setStep('place')}>
+              戻る
+            </button>
+          </section>
+        )}
+
+        {step === 'body' && (
+          <section className="panel">
+            <h2>今日の体の状態</h2>
+            <p className="hint">
+              「無理せず」では負荷の低い種目だけを提案します（健康・長く続くことを優先）。
+            </p>
+            <div className="segment col">
+              {(Object.keys(BODY_STATE_LABEL) as BodyState[]).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={bodyState === key ? 'seg active full' : 'seg full'}
+                  onClick={() => setBodyState(key)}
+                >
+                  {BODY_STATE_LABEL[key]}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="primary full" onClick={() => setStep('time')}>
+              次へ
+            </button>
+            <button
+              type="button"
+              className="ghost full mt"
+              onClick={() => setStep(place === 'gym' ? 'gym' : 'homeEquip')}
+            >
               戻る
             </button>
           </section>
@@ -348,11 +300,7 @@ export default function App() {
             <button type="button" className="primary full" onClick={() => setStep('result')}>
               メニューを見る
             </button>
-            <button
-              type="button"
-              className="ghost full mt"
-              onClick={() => setStep(place === 'gym' ? 'gym' : 'homeEquip')}
-            >
+            <button type="button" className="ghost full mt" onClick={() => setStep('body')}>
               戻る
             </button>
           </section>
@@ -367,6 +315,9 @@ export default function App() {
                 {selectedGym ? ` · ${selectedGym.name}` : ''}
               </p>
               <p>
+                <strong>体の状態:</strong> {BODY_STATE_LABEL[bodyState]}
+              </p>
+              <p>
                 <strong>時間:</strong> 約{minutes}分
               </p>
               <p>
@@ -376,7 +327,7 @@ export default function App() {
             </div>
             {menu.length === 0 ? (
               <p className="empty">
-                条件に合う種目がありません（デモデータが少ないため）。器具を増やすか、別の店舗を試してください。
+                条件に合う種目がありません。器具を増やす・別の店舗を試す・体の状態を「ふつう」に変えるなどを試してください。
               </p>
             ) : (
               <ol className="menu">
