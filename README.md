@@ -23,7 +23,12 @@ npm run dev
 
 ## おまけ：レーシングゲーム
 
-[games/racing/index.html](games/racing/index.html) は、ブラウザで開くだけで遊べる疑似3Dレーシングゲームです（ビルド不要・単一ファイル）。3周のタイムアタックで、PC はキーボード、スマホは画面のボタンで操作します。
+[games/racing/index.html](games/racing/index.html) は、ビルド不要の単一ファイルで動く疑似3Dレーシングゲームです。3周のタイムアタックで、PC はキーボード、スマホは画面のボタンで操作します。
+
+GitHub 上でリンクを開くとソースが表示されるだけなので、遊ぶときは次のどちらかで開いてください。
+
+- リポジトリをクローン（または「Code → Download ZIP」）して、`games/racing/index.html` をブラウザで開く
+- ローカルサーバーで開く（スマホから試す場合など）: `npx serve games/racing` を実行し、表示された URL を開く
 
 ## GitHub 上の名前について
 

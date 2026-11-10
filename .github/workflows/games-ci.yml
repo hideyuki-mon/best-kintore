@@ -1,0 +1,34 @@
+name: Games CI
+
+on:
+  push:
+    paths:
+      - 'games/**'
+      - '.github/workflows/games-ci.yml'
+  pull_request:
+    paths:
+      - 'games/**'
+      - '.github/workflows/games-ci.yml'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # 単一ファイルの HTML に埋め込んだスクリプトを取り出し、構文エラーがないか確認する
+      - name: Check inline scripts
+        run: |
+          set -e
+          for f in games/*/index.html; do
+            node -e '
+              const fs = require("fs");
+              const html = fs.readFileSync(process.argv[1], "utf8");
+              const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+              if (scripts.length === 0) { console.error("no inline script: " + process.argv[1]); process.exit(1); }
+              scripts.forEach((code, i) => { new Function(code); });
+              console.log("ok: " + process.argv[1] + " (" + scripts.length + " script)");
+            ' "$f"
+          done

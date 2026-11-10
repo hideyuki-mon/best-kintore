@@ -2,15 +2,18 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>ハイウェイ・ダッシュ</title>
 <style>
   :root {
-    --hud-bg: rgba(10, 14, 28, 0.62);
+    --hud-bg: rgba(10, 14, 28, 0.78);
     --hud-fg: #f4f6ff;
     --accent: #ffcc33;
-    --danger: #ff4d5e;
     --nitro: #36d6ff;
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
   }
   * { box-sizing: border-box; }
   html, body {
@@ -18,82 +21,117 @@
     background: #0b0f1e; color: var(--hud-fg);
     font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
     -webkit-user-select: none; user-select: none; touch-action: none;
+    -webkit-tap-highlight-color: transparent;
   }
-  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+  canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
 
+  /* ---------- HUD ---------- */
   .hud {
-    position: fixed; top: 12px; left: 12px; right: 12px;
-    display: flex; justify-content: space-between; gap: 8px; pointer-events: none;
+    position: fixed;
+    top: calc(12px + var(--sat)); left: calc(12px + var(--sal)); right: calc(12px + var(--sar));
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; pointer-events: none;
     font-variant-numeric: tabular-nums;
   }
-  .panel {
-    background: var(--hud-bg); border-radius: 12px; padding: 8px 12px;
-    backdrop-filter: blur(4px); line-height: 1.35; font-size: 14px;
-  }
+  .panel { background: var(--hud-bg); border-radius: 12px; padding: 8px 12px; line-height: 1.4; font-size: 14px; white-space: nowrap; }
   .panel b { color: var(--accent); font-weight: 700; }
   .big { font-size: 26px; font-weight: 800; }
-  .label { font-size: 11px; opacity: 0.75; letter-spacing: 0.05em; }
-  .nitro-bar { width: 110px; height: 8px; background: rgba(255,255,255,0.15); border-radius: 4px; overflow: hidden; margin-top: 4px; }
-  .nitro-bar > i { display: block; height: 100%; width: 100%; background: var(--nitro); transition: width 0.1s linear; }
+  .label { font-size: 12px; letter-spacing: 0.05em; color: #c9d0ea; }
+  .nitro-bar { width: 110px; height: 10px; background: rgba(255,255,255,0.18); border-radius: 5px; overflow: hidden; margin-top: 4px; margin-left: auto; }
+  .nitro-bar > i { display: block; height: 100%; width: 100%; background: var(--nitro); transform-origin: left center; }
   .nitro-bar.on > i { background: #ffffff; box-shadow: 0 0 10px var(--nitro); }
+  .nitro-bar.locked > i { background: #6c7a99; }
+  .nitro-bar.denied { animation: deny 0.15s linear 0s 4; }
+  @keyframes deny { 50% { outline: 2px solid #ff4d5e; } }
+  .hud-center { display: flex; gap: 6px; pointer-events: auto; }
+  .hud-btn {
+    border: 0; border-radius: 999px; background: var(--hud-bg); color: #fff;
+    min-width: 44px; height: 44px; padding: 0 12px; font-size: 13px; font-family: inherit; cursor: pointer;
+    white-space: nowrap;
+  }
+  .short { display: none; }
+  .hud-btn#pauseBtn { font-size: 16px; }
+  body:not(.playing) #pauseBtn { display: none; }
 
+  /* ---------- オーバーレイ ---------- */
   .overlay {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-    background: rgba(6, 8, 18, 0.55); padding: 16px;
+    background: rgba(6, 8, 18, 0.55);
+    padding: calc(16px + var(--sat)) calc(16px + var(--sar)) calc(16px + var(--sab)) calc(16px + var(--sal));
   }
   .overlay[hidden] { display: none; }
   .card {
-    background: rgba(16, 20, 40, 0.92); border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(16, 20, 40, 0.94); border: 1px solid rgba(255,255,255,0.12);
     border-radius: 18px; padding: 24px 22px; max-width: 420px; width: 100%; text-align: center;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5); max-height: 100%; overflow-y: auto;
   }
-  .card h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: 0.04em; }
-  .card h1 span { color: var(--accent); }
-  .card p { margin: 6px 0; opacity: 0.88; font-size: 14px; }
-  .keys { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; margin: 14px auto; max-width: 300px; font-size: 13px; }
-  .keys kbd { background: rgba(255,255,255,0.12); border-radius: 6px; padding: 1px 7px; font-family: inherit; font-size: 12px; }
+  .card h1 { margin: 0 0 6px; font-size: clamp(24px, 7vw, 30px); letter-spacing: 0.04em; }
+  .card h1 span { display: inline-block; }
+  .card h1 .dot { color: var(--accent); }
+  .card p { margin: 6px 0; font-size: 14px; color: #dfe4f5; word-break: keep-all; overflow-wrap: anywhere; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; margin: 14px auto; max-width: 320px; font-size: 13px; }
+  .keys kbd { background: rgba(255,255,255,0.14); border-radius: 6px; padding: 1px 7px; font-family: inherit; font-size: 12px; }
+  .actions { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 14px; }
   .btn {
-    margin-top: 14px; border: 0; border-radius: 999px; padding: 12px 34px;
-    background: var(--accent); color: #1b1400; font-size: 17px; font-weight: 800; cursor: pointer;
-    font-family: inherit;
+    border: 0; border-radius: 999px; padding: 12px 34px; min-width: 180px; min-height: 44px;
+    background: var(--accent); color: #1b1400; font-size: 17px; font-weight: 800; cursor: pointer; font-family: inherit;
   }
+  .btn.sub { background: rgba(255,255,255,0.12); color: #fff; font-size: 15px; font-weight: 700; }
   .btn:active { transform: scale(0.97); }
   .results { margin: 10px auto; font-variant-numeric: tabular-nums; font-size: 15px; max-width: 260px; }
-  .results div { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,0.12); }
+  .results div { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,0.15); }
   .new-record { color: var(--accent); font-weight: 800; margin-top: 8px; }
 
-  .countdown {
-    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-    pointer-events: none; font-size: 120px; font-weight: 900; color: #fff;
+  .countdown, .banner {
+    position: fixed; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none; color: #fff; text-align: center;
     text-shadow: 0 6px 0 rgba(0,0,0,0.35), 0 0 30px rgba(255,204,51,0.6);
   }
-  .countdown[hidden] { display: none; }
+  .countdown { top: 0; bottom: 0; font-size: 120px; font-weight: 900; }
+  .banner { top: 24%; font-size: 44px; font-weight: 900; }
+  .banner small { font-size: 18px; color: var(--accent); margin-top: 4px; }
+  .banner.show { animation: banner 1.6s ease-out forwards; }
+  @keyframes banner { 0% { opacity: 0; transform: scale(1.4); } 12% { opacity: 1; transform: scale(1); } 80% { opacity: 1; } 100% { opacity: 0; } }
+  .countdown[hidden], .banner[hidden] { display: none; }
 
-  .touch { position: fixed; bottom: 16px; left: 16px; right: 16px; display: none; justify-content: space-between; pointer-events: none; }
-  .touch .grp { display: flex; gap: 10px; pointer-events: auto; align-items: flex-end; }
-  .touch .col { display: flex; flex-direction: column; gap: 8px; align-items: center; }
-  .touch button {
-    width: 72px; height: 72px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.35);
-    background: rgba(10,14,28,0.45); color: #fff; font-size: 26px; font-weight: 800; font-family: inherit;
-    touch-action: none;
+  /* ---------- タッチ操作 ---------- */
+  .touch {
+    position: fixed; bottom: calc(16px + var(--sab)); left: calc(16px + var(--sal)); right: calc(16px + var(--sar));
+    display: none; justify-content: space-between; align-items: flex-end; pointer-events: none;
   }
-  .touch button.pressed { background: rgba(255,204,51,0.55); }
-  .touch button.small { width: 72px; height: 40px; border-radius: 20px; font-size: 13px; }
-  body.is-touch .touch { display: flex; }
+  body.has-touch.playing .touch { display: flex; }
+  .touch .grp { display: flex; gap: 12px; pointer-events: auto; align-items: flex-end; }
+  .touch .col { display: flex; flex-direction: column; gap: 14px; align-items: center; }
+  .touch button, .steer .pad {
+    width: 72px; height: 72px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4);
+    background: rgba(10,14,28,0.5); color: #fff; font-size: 26px; font-weight: 800; font-family: inherit;
+    display: flex; align-items: center; justify-content: center; touch-action: none;
+  }
+  .touch button.nitro { width: 72px; height: 48px; border-radius: 24px; font-size: 13px; border-color: var(--nitro); }
+  .touch .pressed { background: rgba(255,204,51,0.55); }
+  .steer { display: flex; gap: 12px; pointer-events: auto; touch-action: none; padding: 8px; margin: -8px; }
+
   body.is-touch .pc-only { display: none; }
-  body:not(.is-touch) .touch-only { display: none; }
+  body:not(.has-touch) .touch-only { display: none; }
 
-  .mute {
-    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
-    border: 0; border-radius: 999px; background: var(--hud-bg); color: #fff; padding: 6px 12px; font-size: 13px; cursor: pointer;
-    font-family: inherit;
-  }
   @media (max-width: 480px) {
     .big { font-size: 20px; }
     .panel { font-size: 12px; padding: 6px 9px; }
     .nitro-bar { width: 80px; }
-    .touch button { width: 62px; height: 62px; font-size: 22px; }
-    .touch button.small { width: 62px; height: 36px; }
+    .hud-btn { padding: 0 10px; }
+    .long { display: none; }
+    .short { display: inline; }
+    .touch button, .steer .pad { width: 64px; height: 64px; font-size: 22px; }
+    .touch button.nitro { width: 64px; height: 48px; }
+  }
+  @media (max-height: 500px) {
+    .panel { font-size: 11px; padding: 5px 9px; line-height: 1.3; }
+    .big { font-size: 18px; }
+    .minor { display: none; }
+    .countdown { font-size: 80px; }
+    .banner { font-size: 32px; top: 18%; }
+    .touch button, .steer .pad { width: 58px; height: 58px; }
+    .touch button.nitro { width: 58px; height: 44px; }
+    .touch .col { gap: 8px; }
   }
 </style>
 </head>
@@ -104,9 +142,14 @@
   <div class="panel">
     <div class="label">LAP</div>
     <div class="big"><span id="lap">1</span>/<span id="lapTotal">3</span></div>
-    <div>タイム <b id="time">0:00.00</b></div>
-    <div>前周 <span id="lastLap">--</span></div>
-    <div>ベスト <span id="bestLap">--</span></div>
+    <div>ラップ <b id="lapTime">0:00.00</b></div>
+    <div>合計 <span id="totalTime">0:00.00</span></div>
+    <div class="minor">前周 <span id="lastLap">--</span></div>
+    <div class="minor">ベスト <span id="bestLap">--</span></div>
+  </div>
+  <div class="hud-center">
+    <button class="hud-btn" id="pauseBtn" type="button" aria-label="一時停止">⏸</button>
+    <button class="hud-btn" id="muteBtn" type="button" aria-pressed="true">サウンド ON</button>
   </div>
   <div class="panel" style="text-align:right">
     <div class="label">SPEED</div>
@@ -116,32 +159,38 @@
   </div>
 </div>
 
-<button class="mute" id="muteBtn" type="button">🔊 音あり</button>
-
 <div class="countdown" id="countdown" hidden></div>
+<div class="banner" id="banner" hidden></div>
 
 <div class="overlay" id="titleScreen">
   <div class="card">
-    <h1>ハイウェイ<span>・</span>ダッシュ</h1>
-    <p>カーブと坂を駆け抜けて、3周のタイムアタック！</p>
-    <p>他の車にぶつかったりコースアウトすると減速します。</p>
+    <h1><span>ハイウェイ</span><span><span class="dot">・</span>ダッシュ</span></h1>
+    <p>カーブと坂を駆け抜ける、<wbr>3周のタイムアタック！</p>
+    <p>車にぶつかったり<wbr>コースアウトすると<wbr>減速します。</p>
     <div class="keys pc-only">
-      <kbd>↑</kbd><span>アクセル</span>
-      <kbd>↓</kbd><span>ブレーキ</span>
-      <kbd>← →</kbd><span>ハンドル</span>
-      <kbd>Space</kbd><span>ニトロ（ゲージ消費）</span>
-      <kbd>P</kbd><span>一時停止</span>
+      <kbd>↑ / W</kbd><span>アクセル</span>
+      <kbd>↓ / S</kbd><span>ブレーキ</span>
+      <kbd>← → / A D</kbd><span>ハンドル</span>
+      <kbd>Space / Shift</kbd><span>ニトロ（ゲージ消費）</span>
+      <kbd>P / Esc</kbd><span>一時停止</span>
+      <kbd>Enter</kbd><span>スタート・再開</span>
     </div>
-    <p class="touch-only">画面下のボタンで操作します。<br>右：アクセル／ブレーキ／ニトロ　左：ハンドル</p>
+    <p class="touch-only">左下：ハンドル（指をすべらせて左右切替）<br>右下：▲アクセル ▼ブレーキ NITRO</p>
     <div id="titleBest"></div>
-    <button class="btn" id="startBtn" type="button">スタート</button>
+    <div class="actions">
+      <button class="btn" id="startBtn" type="button">スタート</button>
+    </div>
   </div>
 </div>
 
 <div class="overlay" id="pauseScreen" hidden>
   <div class="card">
     <h1>一時停止</h1>
-    <button class="btn" id="resumeBtn" type="button">再開</button>
+    <div class="actions">
+      <button class="btn" id="resumeBtn" type="button">再開</button>
+      <button class="btn sub" id="restartBtn" type="button">最初からやり直す</button>
+      <button class="btn sub" data-action="title" type="button">タイトルへ</button>
+    </div>
   </div>
 </div>
 
@@ -150,19 +199,22 @@
     <h1>ゴール！</h1>
     <div class="results" id="results"></div>
     <div class="new-record" id="newRecord" hidden>🏆 自己ベスト更新！</div>
-    <button class="btn" id="retryBtn" type="button">もう一度</button>
+    <div class="actions">
+      <button class="btn" id="retryBtn" type="button">もう一度</button>
+      <button class="btn sub" data-action="title" type="button">タイトルへ</button>
+    </div>
   </div>
 </div>
 
 <div class="touch">
-  <div class="grp">
-    <button type="button" data-key="left" aria-label="左">◀</button>
-    <button type="button" data-key="right" aria-label="右">▶</button>
+  <div class="steer" id="steer">
+    <span class="pad" data-side="left" aria-hidden="true">◀</span>
+    <span class="pad" data-side="right" aria-hidden="true">▶</span>
   </div>
   <div class="grp">
     <button type="button" data-key="brake" aria-label="ブレーキ">▼</button>
     <div class="col">
-      <button type="button" class="small" data-key="nitro" aria-label="ニトロ">NITRO</button>
+      <button type="button" class="nitro" data-key="nitro" aria-label="ニトロ">NITRO</button>
       <button type="button" data-key="accel" aria-label="アクセル">▲</button>
     </div>
   </div>
@@ -172,8 +224,16 @@
 (() => {
   'use strict';
 
+  // ---------- 端末・設定 ----------
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;        // 主な入力がタッチ
+  const hasTouch = window.matchMedia('(any-pointer: coarse)').matches || isTouch; // タッチも使える
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (isTouch) document.body.classList.add('is-touch');
+  if (hasTouch) document.body.classList.add('has-touch');
+
   // ---------- 定数 ----------
   const STEP = 1 / 60;
+  const MAX_FRAME_DT = 0.1;                          // 処理落ち・タブ復帰時に一気に進めない
   const SEGMENT_LENGTH = 200;
   const RUMBLE_LENGTH = 3;
   const ROAD_WIDTH = 2000;
@@ -182,20 +242,27 @@
   const CAMERA_HEIGHT = 1000;
   const CAMERA_DEPTH = 1 / Math.tan((FOV / 2) * Math.PI / 180);
   const PLAYER_Z = CAMERA_HEIGHT * CAMERA_DEPTH;
-  const DRAW_DISTANCE = 300;
+  const DRAW_DISTANCE = isTouch ? 200 : 300;
   const FOG_DENSITY = 5;
   const MAX_SPEED = SEGMENT_LENGTH / STEP;           // 通常最高速
   const NITRO_SPEED = MAX_SPEED * 1.3;               // ニトロ時最高速
   const ACCEL = MAX_SPEED / 5;
   const BRAKING = -MAX_SPEED;
   const DECEL = -MAX_SPEED / 5;
+  const OVERSPEED_DECEL = MAX_SPEED * 0.3;           // ニトロ終了後に最高速へ戻す減速
   const OFFROAD_DECEL = -MAX_SPEED / 2;
   const OFFROAD_LIMIT = MAX_SPEED / 4;
   const CENTRIFUGAL = 0.3;
+  const NITRO_DRAIN = 1 / 3;                         // 満タンで3秒
+  const NITRO_REFILL = 1 / 12;                       // 空から12秒で満タン
+  const NITRO_UNLOCK = 0.3;                          // 使い切ったらここまで回復するまで使えない
   const TOTAL_LAPS = 3;
   const TOTAL_CARS = 40;
   const CAR_W = 600, CAR_H = 330;
+  const PLAYER_W = CAR_W / ROAD_WIDTH;
   const KMH_FACTOR = 260 / MAX_SPEED;
+  const MIN_VALID_LAP = 20;                          // 保存値の妥当性チェック用（秒）
+  const STORAGE = { bestLap: 'hd2_bestLap', bestTotal: 'hd2_bestTotal', muted: 'hd2_muted' };
 
   const COLORS = {
     fog: '#1d2a4a',
@@ -206,6 +273,7 @@
   };
   const CAR_COLORS = ['#e8443a', '#2f7de1', '#f2b632', '#8a4fe0', '#21b39a', '#f07c2a', '#e6e6e6', '#30323a'];
   const BILLBOARD_TEXT = ['スクワット！', '腕立て100回', 'プロテイン', '腹筋王', '筋トレは裏切らない', 'ゴールはもうすぐ', '安全運転'];
+  const FONT = '"Hiragino Sans","Noto Sans JP",sans-serif';
 
   // ---------- ユーティリティ ----------
   const U = {
@@ -232,19 +300,43 @@
   const storage = {
     get(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; } },
     set(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { /* 保存できなくても続行 */ } },
+    getTime(key, min) {
+      const v = this.get(key);
+      return (typeof v === 'number' && Number.isFinite(v) && v >= min) ? v : null;
+    },
   };
 
   // ---------- キャンバス ----------
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   let W = 0, H = 0;
+  let skyGradient = null, sunGlow = null, sunRadius = 0;
+
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth; H = window.innerHeight;
+    W = canvas.clientWidth || window.innerWidth;
+    H = canvas.clientHeight || window.innerHeight;
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 背景のグラデーションはサイズが変わったときだけ作る
+    skyGradient = ctx.createLinearGradient(0, 0, 0, H / 2);
+    skyGradient.addColorStop(0, '#2b3d8f');
+    skyGradient.addColorStop(0.6, '#e2709b');
+    skyGradient.addColorStop(1, '#ffc27a');
+    sunRadius = Math.min(W, H) * 0.09;
+    sunGlow = ctx.createRadialGradient(0, 0, sunRadius * 0.2, 0, 0, sunRadius * 2.4);
+    sunGlow.addColorStop(0, 'rgba(255,240,180,0.95)');
+    sunGlow.addColorStop(0.35, 'rgba(255,200,120,0.5)');
+    sunGlow.addColorStop(1, 'rgba(255,170,120,0)');
   }
-  window.addEventListener('resize', resize);
+  if ('ResizeObserver' in window) new ResizeObserver(resize).observe(canvas);
+  else window.addEventListener('resize', resize);
+  (function watchDpr() {
+    // モニター間の移動などで devicePixelRatio が変わったら作り直す
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    const onChange = () => { resize(); watchDpr(); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange, { once: true });
+  })();
   resize();
 
   // ---------- コース生成 ----------
@@ -265,7 +357,7 @@
       index: n,
       p1: { world: { y: lastY(), z: n * SEGMENT_LENGTH }, camera: {}, screen: {} },
       p2: { world: { y, z: (n + 1) * SEGMENT_LENGTH }, camera: {}, screen: {} },
-      curve, sprites: [], cars: [],
+      curve, sprites: [], cars: [], clip: 0,
       color: Math.floor(n / RUMBLE_LENGTH) % 2 ? COLORS.dark : COLORS.light,
     });
   }
@@ -366,20 +458,22 @@
   const keys = { left: false, right: false, accel: false, brake: false, nitro: false };
   const state = {
     mode: 'title', // title | countdown | race | paused | finish
-    position: 0, playerX: 0, speed: 0, steer: 0,
+    resumeMode: null,
+    position: 0, travel: 0, playerX: 0, speed: 0, steer: 0,
     skyOffset: 0, playerY: 0,
     lap: 1, lapTime: 0, totalTime: 0, lapTimes: [], lastLap: null,
-    nitro: 1, nitroActive: false,
-    shake: 0, countdown: 0,
-    bestLap: storage.get('hd_bestLap'),
-    bestTotal: storage.get('hd_bestTotal'),
+    nitro: 1, nitroActive: false, nitroLocked: false, prevNitroKey: false,
+    shake: 0, countdown: 0, goTimer: 0,
+    bestLap: storage.getTime(STORAGE.bestLap, MIN_VALID_LAP),
+    bestTotal: storage.getTime(STORAGE.bestTotal, MIN_VALID_LAP * TOTAL_LAPS),
   };
 
   function resetRace() {
     Object.assign(state, {
-      position: 0, playerX: 0, speed: 0, steer: 0, skyOffset: 0,
+      position: 0, travel: 0, playerX: 0, speed: 0, steer: 0, skyOffset: 0,
       lap: 1, lapTime: 0, totalTime: 0, lapTimes: [], lastLap: null,
-      nitro: 1, nitroActive: false, shake: 0,
+      nitro: 1, nitroActive: false, nitroLocked: false, prevNitroKey: false,
+      shake: 0, countdown: 0, goTimer: 0, resumeMode: null,
     });
     resetCars();
   }
@@ -388,7 +482,6 @@
   function updateCars(dt) {
     for (const car of cars) {
       const oldSeg = findSegment(car.z);
-      // 前の車が遅い場合は少し車線をずらす
       car.z = U.increase(car.z, dt * car.speed, trackLength);
       car.percent = U.percentRemaining(car.z, SEGMENT_LENGTH);
       const newSeg = findSegment(car.z);
@@ -400,47 +493,89 @@
     }
   }
 
+  function updateCountdown(dt) {
+    const prev = Math.ceil(state.countdown);
+    state.countdown -= dt;
+    const cur = Math.ceil(state.countdown);
+    if (state.countdown <= 0) {
+      setMode('race');
+      countdownEl.textContent = 'GO!';
+      state.goTimer = 0.7;
+      sound.beep(880);
+    } else if (cur !== prev) {
+      countdownEl.textContent = cur;
+      sound.beep(440);
+    }
+  }
+
+  function updateNitro(dt) {
+    const pressed = keys.nitro;
+    // 使い切ったら「一定量まで回復」かつ「ボタンを一度離す」まで再発動しない
+    if (state.nitroLocked && state.nitro >= NITRO_UNLOCK && !pressed) state.nitroLocked = false;
+    const canUse = !state.nitroLocked && state.nitro > 0 && state.speed > MAX_SPEED * 0.3;
+    state.nitroActive = pressed && canUse;
+    if (state.nitroActive) {
+      state.nitro -= dt * NITRO_DRAIN;
+      if (state.nitro <= 0) { state.nitro = 0; state.nitroLocked = true; }
+    } else {
+      state.nitro = Math.min(1, state.nitro + dt * NITRO_REFILL);
+    }
+    // 押したのに使えないときは知らせる
+    if (pressed && !state.prevNitroKey && !state.nitroActive) {
+      hud.nitroBar.classList.remove('denied');
+      void hud.nitroBar.offsetWidth; // アニメーションを再スタート
+      hud.nitroBar.classList.add('denied');
+      sound.deny();
+    }
+    state.prevNitroKey = pressed;
+  }
+
   function update(dt) {
-    const racing = state.mode === 'race';
+    updateCars(dt);
+    if (state.mode === 'countdown') { updateCountdown(dt); return; }
+    if (state.mode !== 'race') return;
+
+    if (state.goTimer > 0) {
+      state.goTimer -= dt;
+      if (state.goTimer <= 0) countdownEl.hidden = true;
+    }
+
     const playerSegment = findSegment(state.position + PLAYER_Z);
-    const playerW = CAR_W / ROAD_WIDTH;
     const speedPercent = state.speed / MAX_SPEED;
     const dx = dt * 2 * Math.min(speedPercent, 1);
     const startPosition = state.position;
 
-    updateCars(dt);
-    if (state.mode === 'countdown' || state.mode === 'title') return;
-    if (!racing) return;
-
     state.position = U.increase(state.position, dt * state.speed, trackLength);
 
-    state.steer = keys.left ? -1 : keys.right ? 1 : 0;
+    state.steer = keys.left && !keys.right ? -1 : keys.right && !keys.left ? 1 : 0;
     state.playerX += state.steer * dx;
     state.playerX -= dx * speedPercent * playerSegment.curve * CENTRIFUGAL;
 
-    // ニトロ
-    state.nitroActive = keys.nitro && state.nitro > 0 && state.speed > MAX_SPEED * 0.3;
-    if (state.nitroActive) state.nitro = Math.max(0, state.nitro - dt / 3);
-    else state.nitro = Math.min(1, state.nitro + dt / 12);
+    updateNitro(dt);
     const topSpeed = state.nitroActive ? NITRO_SPEED : MAX_SPEED;
-
-    if (keys.accel) state.speed += (state.nitroActive ? ACCEL * 2.2 : ACCEL) * dt;
+    const prevSpeed = state.speed;
+    if (state.nitroActive) state.speed += ACCEL * 2.2 * dt;
+    else if (keys.accel) state.speed += ACCEL * dt;
     else if (keys.brake) state.speed += BRAKING * dt;
     else state.speed += DECEL * dt;
-    if (state.speed > topSpeed) state.speed += DECEL * 1.5 * dt; // ニトロ終了後はゆるやかに戻す
+    if (state.speed > topSpeed) {
+      // 最高速を超えたら、ゆるやかに最高速まで戻す（加速で上乗せはしない）
+      state.speed = Math.max(topSpeed, Math.min(state.speed, prevSpeed) - OVERSPEED_DECEL * dt);
+    }
 
-    // コースアウト
-    if (state.playerX < -1 || state.playerX > 1) {
-      if (state.speed > OFFROAD_LIMIT) state.speed += OFFROAD_DECEL * dt;
+    // コースアウトによる減速
+    if (Math.abs(state.playerX) > 1 && state.speed > OFFROAD_LIMIT) state.speed += OFFROAD_DECEL * dt;
+
+    // 沿道の物との接触（車体の端がはみ出したら判定）
+    if (Math.abs(state.playerX) + PLAYER_W / 2 > 1) {
       for (const sprite of playerSegment.sprites) {
         if (sprite.kind === 'gate') continue;
         const sw = spriteWorldSize(sprite).w / ROAD_WIDTH;
         const center = sprite.offset + (sw / 2) * (sprite.offset > 0 ? 1 : -1);
-        if (U.overlap(state.playerX, playerW, center, sw)) {
+        if (U.overlap(state.playerX, PLAYER_W, center, sw)) {
           state.speed = MAX_SPEED / 5;
           state.position = U.increase(playerSegment.p1.world.z, -PLAYER_Z, trackLength);
-          state.shake = 0.4;
-          sound.bump();
+          bumpFeedback(0.4);
           break;
         }
       }
@@ -448,42 +583,54 @@
 
     // 車との接触
     for (const car of playerSegment.cars) {
-      if (state.speed > car.speed && U.overlap(state.playerX, playerW, car.offset, CAR_W / ROAD_WIDTH, 0.8)) {
+      if (state.speed > car.speed && U.overlap(state.playerX, PLAYER_W, car.offset, CAR_W / ROAD_WIDTH, 0.8)) {
         state.speed = car.speed * (car.speed / state.speed);
         state.position = U.increase(car.z, -PLAYER_Z, trackLength);
-        state.shake = 0.3;
-        sound.bump();
+        bumpFeedback(0.3);
         break;
       }
     }
 
     state.playerX = U.clamp(state.playerX, -3, 3);
     state.speed = U.clamp(state.speed, 0, NITRO_SPEED);
-    state.skyOffset += 0.001 * playerSegment.curve * (state.position - startPosition) / SEGMENT_LENGTH;
     state.shake = Math.max(0, state.shake - dt);
 
-    // ラップ計測
+    // 実際に進んだ距離（押し戻しも含む）を積算し、累積距離で周回を判定する
+    let moved = state.position - startPosition;
+    if (moved < -trackLength / 2) moved += trackLength;
+    else if (moved > trackLength / 2) moved -= trackLength;
+    state.travel += moved;
+    state.skyOffset += 0.001 * playerSegment.curve * moved / SEGMENT_LENGTH;
+
     state.lapTime += dt;
     state.totalTime += dt;
-    if (state.position < startPosition && startPosition - state.position > trackLength / 2) {
-      completeLap();
-    }
+    if (state.travel >= state.lap * trackLength) completeLap();
+  }
+
+  function bumpFeedback(amount) {
+    if (!reduceMotion.matches) state.shake = amount;
+    sound.bump();
   }
 
   function completeLap() {
     const t = state.lapTime;
     state.lapTimes.push(t);
     state.lastLap = t;
+    let newBest = false;
     if (state.bestLap == null || t < state.bestLap) {
       state.bestLap = t;
-      storage.set('hd_bestLap', t);
+      storage.set(STORAGE.bestLap, t);
+      newBest = true;
     }
     if (state.lap >= TOTAL_LAPS) {
       finishRace();
-    } else {
-      state.lap += 1;
-      state.lapTime = 0;
+      return;
     }
+    state.lap += 1;
+    state.lapTime = 0;
+    const title = state.lap === TOTAL_LAPS ? 'FINAL LAP!' : `LAP ${state.lap}`;
+    showBanner(title, newBest ? `ベストラップ更新！ ${U.formatTime(t)}` : `前周 ${U.formatTime(t)}`);
+    sound.lap(state.lap === TOTAL_LAPS);
   }
 
   // ---------- 描画 ----------
@@ -536,44 +683,39 @@
       + Math.sin(x * 0.011 + seed * 2.3) * amp * 0.3
       + Math.sin(x * 0.027 + seed * 5.1) * amp * 0.15;
   }
+  const MOUNTAIN_LAYERS = [
+    { speed: 0.6, amp: 0.16, base: -0.04, color: '#6b4a8f', seed: 1.3 },
+    { speed: 1.2, amp: 0.10, base: 0, color: '#3e3570', seed: 4.2 },
+    { speed: 2.0, amp: 0.05, base: 0, color: '#24305a', seed: 7.7 },
+  ];
   function renderBackground() {
     const horizon = H / 2;
-    const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-    sky.addColorStop(0, '#2b3d8f');
-    sky.addColorStop(0.6, '#e2709b');
-    sky.addColorStop(1, '#ffc27a');
-    ctx.fillStyle = sky;
+    ctx.fillStyle = skyGradient;
     ctx.fillRect(0, 0, W, horizon + 2);
 
-    // 太陽
+    // 太陽（グラデーションは原点基準で作ってあるので移動して描く）
     const sunX = W * 0.5 - (state.skyOffset * W * 0.5) % (W * 2);
     const sunY = horizon - H * 0.12;
-    const r = Math.min(W, H) * 0.09;
-    const g = ctx.createRadialGradient(sunX, sunY, r * 0.2, sunX, sunY, r * 2.4);
-    g.addColorStop(0, 'rgba(255,240,180,0.95)');
-    g.addColorStop(0.35, 'rgba(255,200,120,0.5)');
-    g.addColorStop(1, 'rgba(255,170,120,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(sunX, sunY, r * 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.save();
+    ctx.translate(sunX, sunY);
+    ctx.fillStyle = sunGlow;
+    ctx.beginPath(); ctx.arc(0, 0, sunRadius * 2.4, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#fff2c4';
-    ctx.beginPath(); ctx.arc(sunX, sunY, r, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, sunRadius, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
 
     const vy = -state.playerY * 0.0002 * H; // 坂で少し上下
-    const layers = [
-      { speed: 0.6, amp: H * 0.16, base: horizon - H * 0.04, color: '#6b4a8f', seed: 1.3 },
-      { speed: 1.2, amp: H * 0.10, base: horizon + 1, color: '#3e3570', seed: 4.2 },
-      { speed: 2.0, amp: H * 0.05, base: horizon + 2, color: '#24305a', seed: 7.7 },
-    ];
-    for (const L of layers) {
+    for (const L of MOUNTAIN_LAYERS) {
+      const amp = H * L.amp;
+      const base = horizon + H * L.base + 1;
       const off = state.skyOffset * W * L.speed * 2;
       ctx.fillStyle = L.color;
       ctx.beginPath();
       ctx.moveTo(0, horizon + 4);
-      for (let x = 0; x <= W; x += 8) {
-        const y = L.base + vy * L.speed - Math.abs(mountainY(x + off, L.seed, L.amp)) - L.amp * 0.15;
-        ctx.lineTo(x, y);
+      for (let x = 0; x <= W + 8; x += 8) {
+        ctx.lineTo(x, base + vy * L.speed - Math.abs(mountainY(x + off, L.seed, amp)) - amp * 0.15);
       }
-      ctx.lineTo(W, horizon + 4);
+      ctx.lineTo(W + 8, horizon + 4);
       ctx.closePath();
       ctx.fill();
     }
@@ -589,11 +731,12 @@
     }
   }
 
+  const TREE_GREENS = [['#2c5e2e', '#3b7d3c', '#4f9c45'], ['#1f6b3a', '#2a8549', '#38a35a']];
   function drawTree(x, y, w, h, variant) {
     const trunkW = w * 0.14, trunkH = h * 0.28;
     ctx.fillStyle = '#5a3b22';
     ctx.fillRect(x + w / 2 - trunkW / 2, y + h - trunkH, trunkW, trunkH);
-    const greens = variant > 0.5 ? ['#1f6b3a', '#2a8549', '#38a35a'] : ['#2c5e2e', '#3b7d3c', '#4f9c45'];
+    const greens = TREE_GREENS[variant > 0.5 ? 1 : 0];
     for (let i = 0; i < 3; i++) {
       const ty = y + h * (0.05 + i * 0.2);
       const tw = w * (0.55 + i * 0.22);
@@ -607,7 +750,7 @@
     }
   }
 
-  function drawBillboard(x, y, w, h, text) {
+  function drawBillboard(sprite, x, y, w, h) {
     const postW = w * 0.05;
     ctx.fillStyle = '#444a55';
     ctx.fillRect(x + w * 0.2, y + h * 0.5, postW, h * 0.5);
@@ -618,13 +761,16 @@
     const pad = w * 0.04;
     ctx.fillRect(x + pad, y + pad, w - pad * 2, h * 0.58 - pad * 2);
     if (w > 30) {
+      // 文字幅の比率は一度だけ測ってキャッシュする
+      if (sprite.textRatio == null) {
+        ctx.font = `900 100px ${FONT}`;
+        sprite.textRatio = ctx.measureText(sprite.text).width / 100;
+      }
+      const fs = Math.min(h * 0.2, (w * 0.86) / sprite.textRatio);
+      ctx.font = `900 ${fs}px ${FONT}`;
       ctx.fillStyle = '#1b1400';
-      let fs = h * 0.2;
-      ctx.font = `900 ${fs}px "Hiragino Sans","Noto Sans JP",sans-serif`;
-      const tw = ctx.measureText(text).width;
-      if (tw > w * 0.86) { fs *= (w * 0.86) / tw; ctx.font = `900 ${fs}px "Hiragino Sans","Noto Sans JP",sans-serif`; }
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, x + w / 2, y + h * 0.29);
+      ctx.fillText(sprite.text, x + w / 2, y + h * 0.29);
     }
   }
 
@@ -651,7 +797,7 @@
     }
   }
 
-  // 車（後ろ姿）。x は中心、y は下端
+  // 車（後ろ姿）。cx は中心、by は下端
   function drawCar(cx, by, w, color, steer = 0, isPlayer = false, nitro = false) {
     const h = w * (CAR_H / CAR_W);
     const x = cx - w / 2, y = by - h;
@@ -691,7 +837,7 @@
     ctx.fillRect(x + w * 0.3 + tilt, y + h * 0.19, w * 0.1, h * 0.2);
 
     // テールランプ・ナンバー
-    const braking = isPlayer && keys.brake;
+    const braking = isPlayer && keys.brake && state.mode === 'race';
     ctx.fillStyle = braking ? '#ff3344' : '#b3121f';
     ctx.fillRect(x + w * 0.05, y + h * 0.5, w * 0.2, h * 0.1);
     ctx.fillRect(x + w * 0.75, y + h * 0.5, w * 0.2, h * 0.1);
@@ -705,19 +851,18 @@
     ctx.fillStyle = 'rgba(0,0,0,0.25)';
     ctx.fillRect(x, y + h * 0.75, w, h * 0.07);
 
-    // ニトロの炎
+    // ニトロの炎（グラデーションを作らず、色を重ねて描く）
     if (nitro) {
+      const flicker = reduceMotion.matches ? 0.12 : Math.random() * 0.25;
       for (const ex of [0.3, 0.7]) {
         const fx = x + w * ex, fy = y + h * 0.84;
-        const len = h * (0.35 + Math.random() * 0.25);
-        const grad = ctx.createLinearGradient(fx, fy, fx, fy + len);
-        grad.addColorStop(0, '#ffffff');
-        grad.addColorStop(0.3, '#36d6ff');
-        grad.addColorStop(1, 'rgba(54,100,255,0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.moveTo(fx - w * 0.04, fy); ctx.lineTo(fx + w * 0.04, fy); ctx.lineTo(fx, fy + len);
-        ctx.closePath(); ctx.fill();
+        const len = h * (0.35 + flicker);
+        ctx.fillStyle = 'rgba(54,120,255,0.55)';
+        ctx.beginPath(); ctx.moveTo(fx - w * 0.045, fy); ctx.lineTo(fx + w * 0.045, fy); ctx.lineTo(fx, fy + len); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(54,214,255,0.9)';
+        ctx.beginPath(); ctx.moveTo(fx - w * 0.03, fy); ctx.lineTo(fx + w * 0.03, fy); ctx.lineTo(fx, fy + len * 0.65); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.moveTo(fx - w * 0.015, fy); ctx.lineTo(fx + w * 0.015, fy); ctx.lineTo(fx, fy + len * 0.3); ctx.closePath(); ctx.fill();
       }
     }
   }
@@ -727,30 +872,28 @@
     const w = size.w * scale * W / 2;
     const h = size.h * scale * W / 2;
     if (w < 1 || h < 1) return;
-    let dx;
-    if (sprite.kind === 'gate') dx = x - w / 2;
-    else dx = sprite.offset < 0 ? x - w : x;
+    const dx = sprite.kind === 'gate' ? x - w / 2 : (sprite.offset < 0 ? x - w : x);
     const dy = y - h;
     if (dy >= clipY) return;
-    ctx.save();
-    if (dy + h > clipY) { ctx.beginPath(); ctx.rect(0, 0, W, clipY); ctx.clip(); }
+    const needClip = y > clipY;   // 坂の向こうに一部隠れるときだけクリップする
+    if (needClip) { ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, clipY); ctx.clip(); }
     switch (sprite.kind) {
       case 'tree': drawTree(dx, dy, w, h, sprite.variant); break;
-      case 'billboard': drawBillboard(dx, dy, w, h, sprite.text); break;
+      case 'billboard': drawBillboard(sprite, dx, dy, w, h); break;
       case 'post': drawPost(dx, dy, w, h); break;
       case 'gate': drawGate(dx, dy, w, h); break;
     }
-    ctx.restore();
+    if (needClip) ctx.restore();
   }
 
   function renderOtherCar(car, scale, x, y, clipY) {
     const w = CAR_W * scale * W / 2;
     const h = w * (CAR_H / CAR_W);
     if (w < 1 || y - h >= clipY) return;
-    ctx.save();
-    if (y > clipY) { ctx.beginPath(); ctx.rect(0, 0, W, clipY); ctx.clip(); }
+    const needClip = y > clipY;
+    if (needClip) { ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, clipY); ctx.clip(); }
     drawCar(x, y, w, car.color);
-    ctx.restore();
+    if (needClip) ctx.restore();
   }
 
   function render() {
@@ -760,8 +903,9 @@
     const playerPercent = U.percentRemaining(state.position + PLAYER_Z, SEGMENT_LENGTH);
     state.playerY = U.interpolate(playerSegment.p1.world.y, playerSegment.p2.world.y, playerPercent);
 
-    ctx.save();
-    if (state.shake > 0) {
+    const shaking = state.shake > 0 && !reduceMotion.matches;
+    if (shaking) {
+      ctx.save();
       const s = state.shake * 18;
       ctx.translate(U.rand(-s, s), U.rand(-s, s));
     }
@@ -778,7 +922,6 @@
       const segment = segments[(baseSegment.index + n) % segments.length];
       const looped = segment.index < baseSegment.index;
       const fog = U.fog(n / DRAW_DISTANCE, FOG_DENSITY);
-      segment.fog = fog;
       segment.clip = maxY;
       const camZ = state.position - (looped ? trackLength : 0);
 
@@ -812,60 +955,86 @@
       for (const sprite of segment.sprites) {
         const scale = segment.p1.screen.scale;
         const sx = segment.p1.screen.x + scale * sprite.offset * ROAD_WIDTH * W / 2;
-        const sy = segment.p1.screen.y;
-        renderSprite(sprite, scale, sx, sy, segment.clip);
+        renderSprite(sprite, scale, sx, segment.p1.screen.y, segment.clip);
       }
     }
 
-    // プレイヤーの車
+    // プレイヤーの車（横長の画面では前方が見えるよう高さで上限をかける）
     const pScale = CAMERA_DEPTH / PLAYER_Z;
-    const pw = CAR_W * pScale * W / 2;
+    const wide = W / H > 1.6; // スマホ横向きなど横長の画面
+    const pw = Math.min(CAR_W * pScale * W / 2, H * (wide && isTouch ? 0.3 : 0.45));
     const speedPercent = state.speed / MAX_SPEED;
-    const bounce = 1.5 * Math.random() * speedPercent * (W / 480) * (Math.random() < 0.5 ? -1 : 1);
+    const bounce = reduceMotion.matches ? 0
+      : 1.5 * Math.random() * speedPercent * (W / 480) * (Math.random() < 0.5 ? -1 : 1);
     const updown = playerSegment.p2.world.y - playerSegment.p1.world.y;
-    const bottomPad = isTouch ? 96 : H * 0.03; // タッチ操作時はボタンと重ならないよう上げる
+    const touchControls = document.body.classList.contains('has-touch');
+    // 縦画面のタッチ操作ではボタンと重ならないよう上げる（横画面はボタンが左右にあるので不要）
+    const bottomPad = touchControls && !wide ? 96 + safeAreaBottom() : H * 0.03 + safeAreaBottom();
     const py = H - bottomPad + bounce + U.clamp(updown * 0.05, -6, 6);
-    drawCar(W / 2, py, Math.min(pw, H * 0.55), '#e8443a', state.mode === 'race' ? state.steer : 0, true, state.nitroActive);
+    drawCar(W / 2, py, pw, '#e8443a', state.mode === 'race' ? state.steer : 0, true, state.nitroActive);
 
-    // スピード感の線
-    if (speedPercent > 0.85) {
+    // スピード感の線（動きを減らす設定では出さない）
+    if (speedPercent > 0.85 && !reduceMotion.matches) {
       const a = U.clamp((speedPercent - 0.85) * 2, 0, 0.5);
       ctx.strokeStyle = `rgba(255,255,255,${a})`;
       ctx.lineWidth = 2;
+      ctx.beginPath();
+      const R = Math.max(W, H);
       for (let i = 0; i < 10; i++) {
         const ang = Math.random() * Math.PI * 2;
-        const r1 = Math.max(W, H) * U.rand(0.35, 0.5);
-        const r2 = r1 + Math.max(W, H) * 0.12;
-        ctx.beginPath();
+        const r1 = R * U.rand(0.35, 0.5);
+        const r2 = r1 + R * 0.12;
         ctx.moveTo(W / 2 + Math.cos(ang) * r1, H / 2 + Math.sin(ang) * r1);
         ctx.lineTo(W / 2 + Math.cos(ang) * r2, H / 2 + Math.sin(ang) * r2);
-        ctx.stroke();
       }
+      ctx.stroke();
     }
-    ctx.restore();
+    if (shaking) ctx.restore();
   }
+
+  let cachedSafeBottom = null;
+  function safeAreaBottom() {
+    if (cachedSafeBottom == null) {
+      const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sab'));
+      cachedSafeBottom = Number.isFinite(v) ? v : 0;
+    }
+    return cachedSafeBottom;
+  }
+  window.addEventListener('resize', () => { cachedSafeBottom = null; });
 
   // ---------- HUD ----------
   const $ = (id) => document.getElementById(id);
   const hud = {
-    lap: $('lap'), time: $('time'), lastLap: $('lastLap'), bestLap: $('bestLap'),
+    lap: $('lap'), lapTime: $('lapTime'), totalTime: $('totalTime'), lastLap: $('lastLap'), bestLap: $('bestLap'),
     speed: $('speed'), nitroFill: $('nitroFill'), nitroBar: $('nitroBar'),
   };
   $('lapTotal').textContent = TOTAL_LAPS;
+  const hudCache = {};
+  function setText(key, value) {
+    if (hudCache[key] !== value) { hudCache[key] = value; hud[key].textContent = value; }
+  }
   function updateHud() {
-    hud.lap.textContent = Math.min(state.lap, TOTAL_LAPS);
-    hud.time.textContent = U.formatTime(state.lapTime);
-    hud.lastLap.textContent = state.lastLap != null ? U.formatTime(state.lastLap) : '--';
-    hud.bestLap.textContent = state.bestLap != null ? U.formatTime(state.bestLap) : '--';
-    hud.speed.textContent = Math.round(state.speed * KMH_FACTOR);
-    hud.nitroFill.style.width = `${Math.round(state.nitro * 100)}%`;
-    hud.nitroBar.classList.toggle('on', state.nitroActive);
+    setText('lap', String(Math.min(state.lap, TOTAL_LAPS)));
+    setText('lapTime', U.formatTime(state.lapTime));
+    setText('totalTime', U.formatTime(state.totalTime));
+    setText('lastLap', state.lastLap != null ? U.formatTime(state.lastLap) : '--');
+    setText('bestLap', state.bestLap != null ? U.formatTime(state.bestLap) : '--');
+    setText('speed', String(Math.round(state.speed * KMH_FACTOR)));
+    const nitroPct = Math.round(state.nitro * 100);
+    if (hudCache.nitro !== nitroPct) { hudCache.nitro = nitroPct; hud.nitroFill.style.transform = `scaleX(${nitroPct / 100})`; }
+    const nitroCls = state.nitroActive ? 'on' : state.nitroLocked ? 'locked' : '';
+    if (hudCache.nitroCls !== nitroCls) {
+      hudCache.nitroCls = nitroCls;
+      hud.nitroBar.classList.toggle('on', nitroCls === 'on');
+      hud.nitroBar.classList.toggle('locked', nitroCls === 'locked');
+    }
   }
 
-  // ---------- サウンド（エンジン音） ----------
+  // ---------- サウンド ----------
   const sound = (() => {
     let actx = null, osc = null, osc2 = null, gain = null;
-    let muted = storage.get('hd_muted') === true;
+    let running = false;
+    let muted = storage.get(STORAGE.muted) === true;
     function init() {
       if (actx) return;
       try {
@@ -878,98 +1047,146 @@
         osc.connect(filter); osc2.connect(g2); g2.connect(filter);
         filter.connect(gain); gain.connect(actx.destination);
         osc.start(); osc2.start();
+        running = actx.state === 'running';
       } catch (e) { actx = null; }
     }
+    // 音が要らないとき（ミュート・ポーズ・非表示・タイトル等）は AudioContext ごと止める
     function update() {
       if (!actx) return;
+      const needed = !muted && !document.hidden && (state.mode === 'race' || state.mode === 'countdown');
+      if (needed && !running) { running = true; actx.resume(); }
+      else if (!needed && running) { running = false; gain.gain.value = 0; actx.suspend(); }
+      if (!needed) return;
       const p = state.speed / MAX_SPEED;
-      const active = !muted && (state.mode === 'race' || state.mode === 'countdown');
       const t = actx.currentTime;
-      gain.gain.setTargetAtTime(active ? 0.05 + p * 0.05 : 0, t, 0.05);
+      gain.gain.setTargetAtTime(0.05 + p * 0.05, t, 0.05);
       osc.frequency.setTargetAtTime(50 + p * 160 + (keys.accel ? 10 : 0), t, 0.05);
       osc2.frequency.setTargetAtTime(25 + p * 80, t, 0.05);
     }
-    function bump() {
-      if (!actx || muted) return;
-      const t = actx.currentTime;
+    function tone(type, from, to, vol, dur, delay = 0) {
+      if (!actx || muted || !running) return;
+      const t = actx.currentTime + delay;
       const o = actx.createOscillator(); const g = actx.createGain();
-      o.type = 'triangle'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.25);
-      g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-      o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + 0.32);
-    }
-    function beep(freq) {
-      if (!actx || muted) return;
-      const t = actx.currentTime;
-      const o = actx.createOscillator(); const g = actx.createGain();
-      o.type = 'square'; o.frequency.value = freq;
-      g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-      o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + 0.27);
+      o.type = type; o.frequency.setValueAtTime(from, t);
+      if (to !== from) o.frequency.exponentialRampToValueAtTime(to, t + dur * 0.8);
+      g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
     }
     return {
-      init, update, bump, beep,
+      init, update,
+      bump: () => tone('triangle', 140, 40, 0.25, 0.3),
+      beep: (f) => tone('square', f, f, 0.08, 0.25),
+      deny: () => tone('square', 200, 160, 0.06, 0.12),
+      lap: (final) => { tone('square', 660, 660, 0.07, 0.12); tone('square', final ? 990 : 880, final ? 990 : 880, 0.07, 0.2, 0.13); },
       get muted() { return muted; },
-      toggle() { muted = !muted; storage.set('hd_muted', muted); },
-      resume() { if (actx && actx.state === 'suspended') actx.resume(); },
+      toggle() { muted = !muted; storage.set(STORAGE.muted, muted); },
+      unlock() { init(); if (actx && !running && !muted) { running = true; actx.resume(); } },
     };
   })();
 
   const muteBtn = $('muteBtn');
-  function refreshMute() { muteBtn.textContent = sound.muted ? '🔇 音なし' : '🔊 音あり'; }
-  muteBtn.addEventListener('click', () => { sound.init(); sound.toggle(); refreshMute(); muteBtn.blur(); });
+  function refreshMute() {
+    const label = sound.muted ? 'OFF' : 'ON';
+    muteBtn.innerHTML = `<span class="long">サウンド </span><span class="short">${sound.muted ? '🔇' : '🔊'} </span>${label}`;
+    muteBtn.setAttribute('aria-label', `サウンド ${label}`);
+    muteBtn.setAttribute('aria-pressed', String(!sound.muted));
+  }
+  muteBtn.addEventListener('click', () => { sound.toggle(); sound.unlock(); refreshMute(); muteBtn.blur(); });
   refreshMute();
 
   // ---------- 画面遷移 ----------
   const titleScreen = $('titleScreen'), finishScreen = $('finishScreen'), pauseScreen = $('pauseScreen');
   const countdownEl = $('countdown');
+  const bannerEl = $('banner');
+
+  function setMode(mode) {
+    state.mode = mode;
+    document.body.dataset.mode = mode;
+    document.body.classList.toggle('playing', mode === 'race' || mode === 'countdown');
+    if (mode !== 'race' && mode !== 'countdown') releaseAllKeys();
+  }
+
+  function showBanner(title, sub) {
+    bannerEl.textContent = title;
+    if (sub) { const s = document.createElement('small'); s.textContent = sub; bannerEl.appendChild(s); }
+    bannerEl.hidden = false;
+    bannerEl.classList.remove('show');
+    void bannerEl.offsetWidth; // アニメーションを再スタート
+    bannerEl.classList.add('show');
+  }
+  bannerEl.addEventListener('animationend', () => { bannerEl.hidden = true; bannerEl.classList.remove('show'); });
+
+  function hideOverlays() {
+    titleScreen.hidden = true; finishScreen.hidden = true; pauseScreen.hidden = true;
+    bannerEl.hidden = true;
+  }
 
   function showTitleBest() {
     $('titleBest').innerHTML = state.bestTotal != null
-      ? `<p>自己ベスト（3周）: <b style="color:var(--accent)">${U.formatTime(state.bestTotal)}</b></p>` : '';
+      ? `<p>自己ベスト（${TOTAL_LAPS}周）: <b style="color:var(--accent)">${U.formatTime(state.bestTotal)}</b></p>` : '';
   }
 
-  function startCountdown() {
-    sound.init(); sound.resume();
+  function startRace() {
+    if (state.mode === 'countdown') return; // 二重スタート防止
+    sound.unlock();
     resetRace();
-    titleScreen.hidden = true; finishScreen.hidden = true; pauseScreen.hidden = true;
-    state.mode = 'countdown';
+    hideOverlays();
+    setMode('countdown');
     state.countdown = 3;
-    let n = 3;
+    countdownEl.textContent = '3';
     countdownEl.hidden = false;
-    countdownEl.textContent = n;
     sound.beep(440);
-    const timer = setInterval(() => {
-      n -= 1;
-      if (n > 0) { countdownEl.textContent = n; sound.beep(440); }
-      else if (n === 0) { countdownEl.textContent = 'GO!'; sound.beep(880); state.mode = 'race'; }
-      else { clearInterval(timer); countdownEl.hidden = true; }
-    }, 800);
+  }
+
+  function toTitle() {
+    resetRace();
+    hideOverlays();
+    countdownEl.hidden = true;
+    setMode('title');
+    showTitleBest();
+    titleScreen.hidden = false;
   }
 
   function finishRace() {
-    state.mode = 'finish';
+    setMode('finish');
     state.lap = TOTAL_LAPS;
+    state.speed = 0;
+    state.nitroActive = false;
     const total = state.totalTime;
     let isRecord = false;
     if (state.bestTotal == null || total < state.bestTotal) {
-      state.bestTotal = total; storage.set('hd_bestTotal', total); isRecord = true;
+      state.bestTotal = total; storage.set(STORAGE.bestTotal, total); isRecord = true;
     }
     const rows = state.lapTimes.map((t, i) => `<div><span>${i + 1}周目</span><span>${U.formatTime(t)}</span></div>`).join('');
     $('results').innerHTML = rows +
       `<div><b>合計</b><b>${U.formatTime(total)}</b></div>` +
       `<div><span>自己ベスト</span><span>${U.formatTime(state.bestTotal)}</span></div>`;
     $('newRecord').hidden = !isRecord;
+    bannerEl.hidden = true;
     finishScreen.hidden = false;
   }
 
-  function togglePause() {
-    if (state.mode === 'race') { state.mode = 'paused'; pauseScreen.hidden = false; }
-    else if (state.mode === 'paused') { state.mode = 'race'; pauseScreen.hidden = true; }
+  function pause() {
+    if (state.mode !== 'race' && state.mode !== 'countdown') return;
+    state.resumeMode = state.mode;
+    setMode('paused');
+    pauseScreen.hidden = false;
   }
+  function resume() {
+    if (state.mode !== 'paused') return;
+    pauseScreen.hidden = true;
+    setMode(state.resumeMode || 'race');
+    sound.unlock();
+  }
+  function togglePause() { state.mode === 'paused' ? resume() : pause(); }
 
-  $('startBtn').addEventListener('click', startCountdown);
-  $('retryBtn').addEventListener('click', startCountdown);
-  $('resumeBtn').addEventListener('click', togglePause);
-  document.addEventListener('visibilitychange', () => { if (document.hidden && state.mode === 'race') togglePause(); });
+  $('startBtn').addEventListener('click', startRace);
+  $('retryBtn').addEventListener('click', startRace);
+  $('restartBtn').addEventListener('click', startRace);
+  $('resumeBtn').addEventListener('click', resume);
+  $('pauseBtn').addEventListener('click', (e) => { pause(); e.currentTarget.blur(); });
+  document.querySelectorAll('[data-action="title"]').forEach((b) => b.addEventListener('click', toTitle));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
 
   // ---------- 入力 ----------
   const KEYMAP = {
@@ -979,39 +1196,79 @@
     ArrowDown: 'brake', KeyS: 'brake',
     Space: 'nitro', ShiftLeft: 'nitro', ShiftRight: 'nitro',
   };
+  function releaseAllKeys() {
+    Object.keys(keys).forEach((k) => { keys[k] = false; });
+    steerPointers.clear();
+    document.querySelectorAll('.touch .pressed').forEach((el) => el.classList.remove('pressed'));
+  }
   window.addEventListener('keydown', (e) => {
-    if (KEYMAP[e.code]) { keys[KEYMAP[e.code]] = true; e.preventDefault(); }
-    if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
-    if (e.code === 'Enter') {
-      if (state.mode === 'title' || state.mode === 'finish') startCountdown();
-      else if (state.mode === 'paused') togglePause();
+    if (KEYMAP[e.code]) {
+      e.preventDefault();
+      if (state.mode === 'race' || state.mode === 'countdown') keys[KEYMAP[e.code]] = true;
+      return;
+    }
+    if (e.repeat) return;
+    if (e.code === 'KeyP' || e.code === 'Escape') { e.preventDefault(); togglePause(); }
+    else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+      e.preventDefault(); // フォーカス中のボタンの click と二重に動かないようにする
+      if (state.mode === 'title' || state.mode === 'finish') startRace();
+      else if (state.mode === 'paused') resume();
     }
   });
   window.addEventListener('keyup', (e) => { if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = false; });
-  window.addEventListener('blur', () => Object.keys(keys).forEach((k) => { keys[k] = false; }));
+  window.addEventListener('blur', () => { releaseAllKeys(); pause(); });
 
-  const isTouch = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
-  if (isTouch) document.body.classList.add('is-touch');
+  // ハンドル：左右2つのパッドを1つのゾーンとして扱い、指をすべらせて切り替えられる
+  const steerEl = $('steer');
+  const [padLeft, padRight] = steerEl.querySelectorAll('.pad');
+  const steerPointers = new Map();
+  function refreshSteer() {
+    const sides = [...steerPointers.values()];
+    keys.left = sides.includes('left');
+    keys.right = sides.includes('right');
+    padLeft.classList.toggle('pressed', keys.left);
+    padRight.classList.toggle('pressed', keys.right);
+  }
+  function steerSide(e) {
+    const r = steerEl.getBoundingClientRect();
+    return e.clientX < r.left + r.width / 2 ? 'left' : 'right';
+  }
+  steerEl.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    steerEl.setPointerCapture(e.pointerId);
+    steerPointers.set(e.pointerId, steerSide(e));
+    refreshSteer();
+  });
+  steerEl.addEventListener('pointermove', (e) => {
+    if (!steerPointers.has(e.pointerId)) return;
+    steerPointers.set(e.pointerId, steerSide(e));
+    refreshSteer();
+  });
+  const steerEnd = (e) => { steerPointers.delete(e.pointerId); refreshSteer(); };
+  steerEl.addEventListener('pointerup', steerEnd);
+  steerEl.addEventListener('pointercancel', steerEnd);
+  steerEl.addEventListener('lostpointercapture', steerEnd);
+
   document.querySelectorAll('.touch button').forEach((btn) => {
     const k = btn.dataset.key;
-    const on = (e) => { e.preventDefault(); keys[k] = true; btn.classList.add('pressed'); sound.resume(); };
-    const off = (e) => { e.preventDefault(); keys[k] = false; btn.classList.remove('pressed'); };
+    const on = (e) => { e.preventDefault(); btn.setPointerCapture(e.pointerId); keys[k] = true; btn.classList.add('pressed'); };
+    const off = () => { keys[k] = false; btn.classList.remove('pressed'); };
     btn.addEventListener('pointerdown', on);
     btn.addEventListener('pointerup', off);
     btn.addEventListener('pointercancel', off);
-    btn.addEventListener('pointerleave', off);
-    btn.addEventListener('contextmenu', (e) => e.preventDefault());
+    btn.addEventListener('lostpointercapture', off);
   });
+  document.querySelectorAll('.touch, .touch *').forEach((el) => el.addEventListener('contextmenu', (e) => e.preventDefault()));
 
   // ---------- メインループ ----------
   let last = performance.now();
   let acc = 0;
   function frame(now) {
-    const dt = Math.min(1, (now - last) / 1000);
+    const dt = Math.min(MAX_FRAME_DT, Math.max(0, (now - last) / 1000));
     last = now;
     if (state.mode !== 'paused') {
       acc += dt;
-      while (acc > STEP) { acc -= STEP; update(STEP); }
+      while (acc >= STEP) { acc -= STEP; update(STEP); }
     }
     render();
     updateHud();
@@ -1021,11 +1278,18 @@
 
   buildTrack();
   resetCars();
+  setMode('title');
   showTitleBest();
   requestAnimationFrame(frame);
 
   // テスト用フック
-  window.__racing = { state, keys, get trackLength() { return trackLength; }, get segments() { return segments.length; } };
+  window.__racing = {
+    state, keys,
+    get trackLength() { return trackLength; },
+    get segments() { return segments; },
+    get cars() { return cars; },
+    findSegment,
+  };
 })();
 </script>
 </body>
