@@ -100,15 +100,18 @@
   }
   body.has-touch.playing .touch { display: flex; }
   .touch .grp { display: flex; gap: 12px; pointer-events: auto; align-items: flex-end; }
-  .touch .col { display: flex; flex-direction: column; gap: 14px; align-items: center; }
-  .touch button, .steer .pad {
+  .touch .col { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+  .pedal { display: flex; gap: 12px; touch-action: none; padding: 8px; margin: -8px; }
+  .touch button, .steer .pad, .pedal .pad {
     width: 72px; height: 72px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4);
     background: rgba(10,14,28,0.5); color: #fff; font-size: 26px; font-weight: 800; font-family: inherit;
     display: flex; align-items: center; justify-content: center; touch-action: none;
   }
-  .touch button.nitro { width: 72px; height: 48px; border-radius: 24px; font-size: 13px; border-color: var(--nitro); }
+  .touch button.brake { width: 56px; height: 56px; font-size: 20px; }
+  .touch .pedal .pad.nitro { font-size: 13px; border-color: var(--nitro); color: #bff3ff; }
   .touch .pressed { background: rgba(255,204,51,0.55); }
   .steer { display: flex; gap: 12px; pointer-events: auto; touch-action: none; padding: 8px; margin: -8px; }
+  .steer .pad, .pedal .pad { cursor: default; }
 
   body.is-touch .pc-only { display: none; }
   body:not(.has-touch) .touch-only { display: none; }
@@ -120,8 +123,8 @@
     .hud-btn { padding: 0 10px; }
     .long { display: none; }
     .short { display: inline; }
-    .touch button, .steer .pad { width: 64px; height: 64px; font-size: 22px; }
-    .touch button.nitro { width: 64px; height: 48px; }
+    .touch button, .steer .pad, .pedal .pad { width: 64px; height: 64px; font-size: 22px; }
+    .touch button.brake { width: 52px; height: 52px; font-size: 18px; }
   }
   @media (max-height: 500px) {
     .panel { font-size: 11px; padding: 5px 9px; line-height: 1.3; }
@@ -129,9 +132,9 @@
     .minor { display: none; }
     .countdown { font-size: 80px; }
     .banner { font-size: 32px; top: 18%; }
-    .touch button, .steer .pad { width: 58px; height: 58px; }
-    .touch button.nitro { width: 58px; height: 44px; }
-    .touch .col { gap: 8px; }
+    .touch button, .steer .pad, .pedal .pad { width: 58px; height: 58px; }
+    .touch button.brake { width: 46px; height: 46px; font-size: 16px; }
+    .touch .col { gap: 6px; }
   }
 </style>
 </head>
@@ -175,7 +178,7 @@
       <kbd>P / Esc</kbd><span>一時停止</span>
       <kbd>Enter</kbd><span>スタート・再開</span>
     </div>
-    <p class="touch-only">左下：ハンドル（指をすべらせて左右切替）<br>右下：▲アクセル ▼ブレーキ NITRO</p>
+    <p class="touch-only">左下：ハンドル（指をすべらせて左右切替）<br>右下：▲アクセル ▼ブレーキ<br>▲から左の NITRO へ指をすべらせるとニトロ</p>
     <div id="titleBest"></div>
     <div class="actions">
       <button class="btn" id="startBtn" type="button">スタート</button>
@@ -211,11 +214,12 @@
     <span class="pad" data-side="left" aria-hidden="true">◀</span>
     <span class="pad" data-side="right" aria-hidden="true">▶</span>
   </div>
-  <div class="grp">
-    <button type="button" data-key="brake" aria-label="ブレーキ">▼</button>
-    <div class="col">
-      <button type="button" class="nitro" data-key="nitro" aria-label="ニトロ">NITRO</button>
-      <button type="button" data-key="accel" aria-label="アクセル">▲</button>
+  <div class="grp col">
+    <button type="button" class="brake" data-key="brake" aria-label="ブレーキ">▼</button>
+    <!-- ▲から左へ指をすべらせると、アクセルを踏んだままニトロを使える -->
+    <div class="pedal" id="pedal">
+      <span class="pad nitro" data-zone="nitro" aria-hidden="true">NITRO</span>
+      <span class="pad" data-zone="accel" aria-hidden="true">▲</span>
     </div>
   </div>
 </div>
@@ -463,7 +467,7 @@
     skyOffset: 0, playerY: 0,
     lap: 1, lapTime: 0, totalTime: 0, lapTimes: [], lastLap: null,
     nitro: 1, nitroActive: false, nitroLocked: false, prevNitroKey: false,
-    shake: 0, countdown: 0, goTimer: 0,
+    shake: 0, countdown: 0, goTimer: 0, hitGrace: 0,
     bestLap: storage.getTime(STORAGE.bestLap, MIN_VALID_LAP),
     bestTotal: storage.getTime(STORAGE.bestTotal, MIN_VALID_LAP * TOTAL_LAPS),
   };
@@ -473,7 +477,7 @@
       position: 0, travel: 0, playerX: 0, speed: 0, steer: 0, skyOffset: 0,
       lap: 1, lapTime: 0, totalTime: 0, lapTimes: [], lastLap: null,
       nitro: 1, nitroActive: false, nitroLocked: false, prevNitroKey: false,
-      shake: 0, countdown: 0, goTimer: 0, resumeMode: null,
+      shake: 0, countdown: 0, goTimer: 0, hitGrace: 0, resumeMode: null,
     });
     resetCars();
   }
@@ -555,7 +559,7 @@
     const topSpeed = state.nitroActive ? NITRO_SPEED : MAX_SPEED;
     const prevSpeed = state.speed;
     if (state.nitroActive) state.speed += ACCEL * 2.2 * dt;
-    else if (keys.accel) state.speed += ACCEL * dt;
+    else if (keys.accel || keys.nitro) state.speed += ACCEL * dt; // ニトロボタンはアクセルも兼ねる
     else if (keys.brake) state.speed += BRAKING * dt;
     else state.speed += DECEL * dt;
     if (state.speed > topSpeed) {
@@ -567,14 +571,20 @@
     if (Math.abs(state.playerX) > 1 && state.speed > OFFROAD_LIMIT) state.speed += OFFROAD_DECEL * dt;
 
     // 沿道の物との接触（車体の端がはみ出したら判定）
-    if (Math.abs(state.playerX) + PLAYER_W / 2 > 1) {
+    state.hitGrace = Math.max(0, state.hitGrace - dt);
+    if (state.hitGrace === 0 && Math.abs(state.playerX) + PLAYER_W / 2 > 1) {
       for (const sprite of playerSegment.sprites) {
         if (sprite.kind === 'gate') continue;
         const sw = spriteWorldSize(sprite).w / ROAD_WIDTH;
         const center = sprite.offset + (sw / 2) * (sprite.offset > 0 ? 1 : -1);
         if (U.overlap(state.playerX, PLAYER_W, center, sw)) {
-          state.speed = MAX_SPEED / 5;
-          state.position = U.increase(playerSegment.p1.world.z, -PLAYER_Z, trackLength);
+          // 手前に戻すと同じ物に当たり続けるので、戻さずに横へはじき出す
+          const gap = sw / 2 + PLAYER_W / 2 + 0.05;
+          // 常に道路側（中央寄り）へはじいて、コースに戻りやすくする
+          const dir = -Math.sign(center);
+          state.playerX = center + dir * gap;
+          state.speed = Math.min(state.speed, MAX_SPEED / 5);
+          state.hitGrace = 0.5; // はじかれた直後は連続で当たらない
           bumpFeedback(0.4);
           break;
         }
@@ -1198,7 +1208,7 @@
   };
   function releaseAllKeys() {
     Object.keys(keys).forEach((k) => { keys[k] = false; });
-    steerPointers.clear();
+    slideZones.forEach((z) => z.clear());
     document.querySelectorAll('.touch .pressed').forEach((el) => el.classList.remove('pressed'));
   }
   window.addEventListener('keydown', (e) => {
@@ -1218,36 +1228,48 @@
   window.addEventListener('keyup', (e) => { if (KEYMAP[e.code]) keys[KEYMAP[e.code]] = false; });
   window.addEventListener('blur', () => { releaseAllKeys(); pause(); });
 
-  // ハンドル：左右2つのパッドを1つのゾーンとして扱い、指をすべらせて切り替えられる
+  // 指をすべらせて切り替えられるゾーン（ハンドル・ペダル共通）
+  // pick(e) で「今どのパッドの上か」を返し、apply(set) で keys に反映する
+  const slideZones = [];
+  function makeSlideZone(el, pick, apply) {
+    const pointers = new Map();
+    const pads = [...el.querySelectorAll('.pad')];
+    const refresh = () => {
+      const active = new Set(pointers.values());
+      apply(active);
+      pads.forEach((p) => p.classList.toggle('pressed', active.has(p.dataset.side || p.dataset.zone)));
+    };
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, pick(e));
+      refresh();
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, pick(e));
+      refresh();
+    });
+    const end = (e) => { if (pointers.delete(e.pointerId)) refresh(); };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('lostpointercapture', end);
+    slideZones.push({ clear: () => { pointers.clear(); refresh(); } });
+  }
+  const leftHalf = (el, e) => { const r = el.getBoundingClientRect(); return e.clientX < r.left + r.width / 2; };
+
   const steerEl = $('steer');
-  const [padLeft, padRight] = steerEl.querySelectorAll('.pad');
-  const steerPointers = new Map();
-  function refreshSteer() {
-    const sides = [...steerPointers.values()];
-    keys.left = sides.includes('left');
-    keys.right = sides.includes('right');
-    padLeft.classList.toggle('pressed', keys.left);
-    padRight.classList.toggle('pressed', keys.right);
-  }
-  function steerSide(e) {
-    const r = steerEl.getBoundingClientRect();
-    return e.clientX < r.left + r.width / 2 ? 'left' : 'right';
-  }
-  steerEl.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    steerEl.setPointerCapture(e.pointerId);
-    steerPointers.set(e.pointerId, steerSide(e));
-    refreshSteer();
+  makeSlideZone(steerEl, (e) => (leftHalf(steerEl, e) ? 'left' : 'right'), (active) => {
+    keys.left = active.has('left');
+    keys.right = active.has('right');
   });
-  steerEl.addEventListener('pointermove', (e) => {
-    if (!steerPointers.has(e.pointerId)) return;
-    steerPointers.set(e.pointerId, steerSide(e));
-    refreshSteer();
+
+  // ペダル：右が▲（アクセル）、左が NITRO（アクセル＋ニトロ）
+  const pedalEl = $('pedal');
+  makeSlideZone(pedalEl, (e) => (leftHalf(pedalEl, e) ? 'nitro' : 'accel'), (active) => {
+    keys.accel = active.size > 0;
+    keys.nitro = active.has('nitro');
   });
-  const steerEnd = (e) => { steerPointers.delete(e.pointerId); refreshSteer(); };
-  steerEl.addEventListener('pointerup', steerEnd);
-  steerEl.addEventListener('pointercancel', steerEnd);
-  steerEl.addEventListener('lostpointercapture', steerEnd);
 
   document.querySelectorAll('.touch button').forEach((btn) => {
     const k = btn.dataset.key;
