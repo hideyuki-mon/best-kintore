@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Block Drop</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #fffdf8; --ink: #2b2a28; --muted: #8a857c;
+    --grid: #e7e2d8; --accent: #d9622b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17181b; --panel: #212226; --ink: #ecebe7; --muted: #8d8c88; --grid: #2c2d32; --accent: #f08a4b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 16px;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+  }
+  h1 { margin: 0 0 12px; font-size: 20px; letter-spacing: .08em; }
+  .wrap { display: flex; gap: 12px; align-items: flex-start; }
+  canvas { background: var(--panel); border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.08); display: block; }
+  #board { width: min(60vw, 280px); height: auto; }
+  .side { display: flex; flex-direction: column; gap: 10px; width: 96px; }
+  .box { background: var(--panel); border-radius: 10px; padding: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  .label { font-size: 11px; color: var(--muted); letter-spacing: .06em; }
+  .val { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #next { width: 80px; height: 80px; box-shadow: none; }
+  button {
+    font: inherit; border: 0; border-radius: 10px; background: var(--panel); color: var(--ink);
+    box-shadow: 0 2px 8px rgba(0,0,0,.1); padding: 10px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #fff; font-weight: 700; }
+  .pad { display: grid; grid-template-columns: repeat(4, 64px); gap: 8px; margin-top: 14px; }
+  .pad button { font-size: 20px; height: 56px; }
+  .help { color: var(--muted); font-size: 12px; margin-top: 12px; text-align: center; line-height: 1.6; }
+  .overlay { position: relative; }
+  #msg {
+    position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; background: rgba(0,0,0,.45);
+    color: #fff; border-radius: 10px; font-weight: 700; font-size: 20px; text-align: center;
+  }
+  #msg[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>BLOCK DROP</h1>
+<div class="wrap">
+  <div class="overlay">
+    <canvas id="board" width="300" height="600"></canvas>
+    <div id="msg"><div id="msgText">BLOCK DROP</div><button class="primary" id="start">スタート</button></div>
+  </div>
+  <div class="side">
+    <div class="box"><div class="label">NEXT</div><canvas id="next" width="80" height="80"></canvas></div>
+    <div class="box"><div class="label">SCORE</div><div class="val" id="score">0</div></div>
+    <div class="box"><div class="label">LINES</div><div class="val" id="lines">0</div></div>
+    <div class="box"><div class="label">LEVEL</div><div class="val" id="level">1</div></div>
+    <div class="box"><div class="label">BEST</div><div class="val" id="best">0</div></div>
+    <button id="pause">一時停止</button>
+  </div>
+</div>
+<div class="pad">
+  <button data-a="left" aria-label="左">◀</button>
+  <button data-a="rotate" aria-label="回転">⟳</button>
+  <button data-a="right" aria-label="右">▶</button>
+  <button data-a="drop" aria-label="一気に落とす">⤓</button>
+  <button data-a="down" aria-label="下" style="grid-column: 2">▼</button>
+</div>
+<div class="help">← → 移動 / ↑ 回転 / ↓ 下へ / Space 一気に落とす / P 一時停止</div>
+
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, S = 30;
+  const board = document.getElementById('board'), ctx = board.getContext('2d');
+  const nextC = document.getElementById('next'), nctx = nextC.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  // 7種類のブロック（4マス）
+  const SHAPES = [
+    [[1,1,1,1]],
+    [[1,1],[1,1]],
+    [[0,1,0],[1,1,1]],
+    [[1,0,0],[1,1,1]],
+    [[0,0,1],[1,1,1]],
+    [[0,1,1],[1,1,0]],
+    [[1,1,0],[0,1,1]],
+  ];
+  const COLORS = ['#3a9ad9','#e8b13a','#9b6bd6','#3c6fd1','#e07b39','#4caf6d','#d9534f'];
+
+  let grid, cur, next, score, lines, level, timer, acc, last, running, paused, over, bag = [];
+  let best = 0;
+  try { best = +localStorage.getItem('blockdrop-best') || 0; } catch {}
+  $('best').textContent = best;
+
+  const newGrid = () => Array.from({length: ROWS}, () => Array(COLS).fill(0));
+  function fromBag() {
+    if (!bag.length) { bag = [0,1,2,3,4,5,6]; for (let i = 6; i > 0; i--) { const j = Math.random()*(i+1)|0; [bag[i],bag[j]] = [bag[j],bag[i]]; } }
+    const t = bag.pop();
+    return { t, m: SHAPES[t].map(r => r.slice()), x: 0, y: 0 };
+  }
+  function spawn() {
+    cur = next || fromBag(); next = fromBag();
+    cur.x = (COLS - cur.m[0].length) >> 1; cur.y = 0;
+    if (collide(cur.m, cur.x, cur.y)) gameOver();
+  }
+  function collide(m, x, y) {
+    for (let r = 0; r < m.length; r++) for (let c = 0; c < m[r].length; c++) {
+      if (!m[r][c]) continue;
+      const gx = x + c, gy = y + r;
+      if (gx < 0 || gx >= COLS || gy >= ROWS) return true;
+      if (gy >= 0 && grid[gy][gx]) return true;
+    }
+    return false;
+  }
+  const rot = m => m[0].map((_, i) => m.map(r => r[i]).reverse());
+  function rotate() {
+    const m = rot(cur.m);
+    for (const k of [0, -1, 1, -2, 2]) if (!collide(m, cur.x + k, cur.y)) { cur.m = m; cur.x += k; return; }
+  }
+  function move(dx) { if (!collide(cur.m, cur.x + dx, cur.y)) cur.x += dx; }
+  function down() {
+    if (!collide(cur.m, cur.x, cur.y + 1)) { cur.y++; return true; }
+    lock(); return false;
+  }
+  function hardDrop() { let n = 0; while (!collide(cur.m, cur.x, cur.y + 1)) { cur.y++; n++; } score += n * 2; lock(); }
+  function lock() {
+    cur.m.forEach((r, ri) => r.forEach((v, ci) => { if (v && cur.y + ri >= 0) grid[cur.y + ri][cur.x + ci] = cur.t + 1; }));
+    let cleared = 0;
+    for (let r = ROWS - 1; r >= 0; r--) if (grid[r].every(v => v)) { grid.splice(r, 1); grid.unshift(Array(COLS).fill(0)); cleared++; r++; }
+    if (cleared) {
+      score += [0, 100, 300, 500, 800][cleared] * level;
+      lines += cleared; level = 1 + Math.floor(lines / 10);
+    }
+    spawn(); hud();
+  }
+  function hud() { $('score').textContent = score; $('lines').textContent = lines; $('level').textContent = level; }
+  const interval = () => Math.max(80, 800 - (level - 1) * 70);
+
+  function cell(c, x, y, size, color, alpha = 1) {
+    c.globalAlpha = alpha; c.fillStyle = color;
+    c.beginPath(); c.roundRect(x + 1.5, y + 1.5, size - 3, size - 3, 5); c.fill();
+    c.fillStyle = 'rgba(255,255,255,.22)'; c.fillRect(x + 5, y + 5, size - 10, 3);
+    c.globalAlpha = 1;
+  }
+  function draw() {
+    ctx.clearRect(0, 0, board.width, board.height);
+    ctx.strokeStyle = css('--grid'); ctx.lineWidth = 1;
+    for (let x = 1; x < COLS; x++) { ctx.beginPath(); ctx.moveTo(x*S+.5, 0); ctx.lineTo(x*S+.5, ROWS*S); ctx.stroke(); }
+    for (let y = 1; y < ROWS; y++) { ctx.beginPath(); ctx.moveTo(0, y*S+.5); ctx.lineTo(COLS*S, y*S+.5); ctx.stroke(); }
+    grid.forEach((r, y) => r.forEach((v, x) => v && cell(ctx, x*S, y*S, S, COLORS[v-1])));
+    if (cur && !over) {
+      let gy = cur.y; while (!collide(cur.m, cur.x, gy + 1)) gy++;
+      cur.m.forEach((r, ri) => r.forEach((v, ci) => v && cell(ctx, (cur.x+ci)*S, (gy+ri)*S, S, COLORS[cur.t], .22)));
+      cur.m.forEach((r, ri) => r.forEach((v, ci) => v && cell(ctx, (cur.x+ci)*S, (cur.y+ri)*S, S, COLORS[cur.t])));
+    }
+    nctx.clearRect(0, 0, 80, 80);
+    if (next) {
+      const m = next.m, s = 18, ox = (80 - m[0].length*s)/2, oy = (80 - m.length*s)/2;
+      m.forEach((r, ri) => r.forEach((v, ci) => v && cell(nctx, ox+ci*s, oy+ri*s, s, COLORS[next.t])));
+    }
+  }
+  function loop(t) {
+    if (!running) return;
+    if (!paused) { acc += t - last; if (acc >= interval()) { acc = 0; down(); } }
+    last = t; draw();
+    requestAnimationFrame(loop);
+  }
+  function start() {
+    grid = newGrid(); score = 0; lines = 0; level = 1; next = null; bag = []; over = false; paused = false;
+    spawn(); hud(); $('msg').hidden = true; $('pause').textContent = '一時停止';
+    acc = 0; last = performance.now();
+    if (!running) { running = true; requestAnimationFrame(loop); }
+  }
+  function gameOver() {
+    over = true; running = false;
+    if (score > best) { best = score; try { localStorage.setItem('blockdrop-best', best); } catch {} $('best').textContent = best; }
+    $('msgText').innerHTML = `GAME OVER<br><span style="font-size:14px">SCORE ${score}</span>`;
+    $('start').textContent = 'もう一度';
+    $('msg').hidden = false;
+  }
+  function togglePause() {
+    if (!running) return;
+    paused = !paused; $('pause').textContent = paused ? '再開' : '一時停止';
+    $('msgText').textContent = 'PAUSE'; $('start').hidden = paused;
+    $('msg').hidden = !paused;
+    if (!paused) { $('start').hidden = false; last = performance.now(); }
+  }
+  function act(a) {
+    if (!running || paused) return;
+    if (a === 'left') move(-1);
+    else if (a === 'right') move(1);
+    else if (a === 'rotate') rotate();
+    else if (a === 'down') { if (down()) score += 1; hud(); }
+    else if (a === 'drop') hardDrop();
+    draw();
+  }
+
+  const KEYS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'rotate', ArrowDown: 'down', ' ': 'drop', x: 'rotate' };
+  document.addEventListener('keydown', e => {
+    if (e.key === 'p' || e.key === 'P') return togglePause();
+    if (e.key === 'Enter' && !running) return start();
+    const a = KEYS[e.key]; if (a) { e.preventDefault(); act(a); }
+  });
+  document.querySelectorAll('.pad button').forEach(b => {
+    let rep;
+    const go = e => { e.preventDefault(); act(b.dataset.a); if (['left','right','down'].includes(b.dataset.a)) rep = setInterval(() => act(b.dataset.a), 110); };
+    const stop = () => clearInterval(rep);
+    b.addEventListener('pointerdown', go); ['pointerup','pointerleave','pointercancel'].forEach(t => b.addEventListener(t, stop));
+  });
+  $('start').onclick = start;
+  $('pause').onclick = togglePause;
+
+  grid = newGrid(); draw();
+})();
+</script>
+</body>
+</html>
