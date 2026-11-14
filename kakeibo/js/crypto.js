@@ -23,19 +23,21 @@ export async function deriveKey(passcode, salt, iterations = PBKDF2_ITER) {
   );
 }
 
-const AAD = enc.encode('kakeibo-vault-v1');
+// 用途ごとに追加認証データ(AAD)を分け、本体用の暗号文をバックアップとして（またはその逆に）流用できないようにする
+const aad = (purpose) => enc.encode(`kakeibo|${purpose}|v1`);
 
-export async function encryptJSON(key, obj) {
+export async function encryptJSON(key, obj, purpose = 'vault') {
   const iv = randomBytes(12);
   const ct = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: AAD }, key, enc.encode(JSON.stringify(obj))
+    { name: 'AES-GCM', iv, additionalData: aad(purpose) }, key, enc.encode(JSON.stringify(obj))
   );
   return { iv, ct: new Uint8Array(ct) };
 }
 
 // 失敗（パスコード違い・改ざん）の場合は例外を投げる
-export async function decryptJSON(key, { iv, ct }) {
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: AAD }, key, ct);
+export async function decryptJSON(key, { iv, ct }, purpose = 'vault') {
+  if (!iv || !ct) throw new Error('empty');
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad(purpose) }, key, ct);
   return JSON.parse(dec.decode(pt));
 }
 

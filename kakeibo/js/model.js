@@ -1,6 +1,7 @@
 // データモデルと純粋関数（表示・集計・検証）
 export const MAX_AMOUNT = 999999999;
 export const MAX_LOG = 5000;
+export const LOCK_OPTIONS = [1, 5, 10, 30, 60];
 export const UNCAT = { expense: 'uncat-e', income: 'uncat-i' };
 
 const uid = () => crypto.randomUUID();
@@ -38,7 +39,7 @@ export function defaultState() {
     recs: [],
     budget: { monthly: 0 },
     log: [],
-    settings: { autoLockMin: 5, lastPay: null, lastBackupAt: 0, installHintHidden: false },
+    settings: { autoLockMin: 10, lastPay: null, lastBackupAt: 0, installHintHidden: false },
   };
 }
 
@@ -132,7 +133,7 @@ export function sanitizeState(raw) {
   const tx = arr(raw.tx).filter((t) => t && typeof t.id === 'string' && validAmount(t.amount) && isDate(t.date)
     && (t.type === 'expense' || t.type === 'income'))
     .map((t) => ({ id: str(t.id, 64), type: t.type, amount: t.amount, cat: str(t.cat, 64), date: t.date,
-      memo: str(t.memo, 100), pay: str(t.pay, 64), rec: t.rec ? str(t.rec, 64) : undefined,
+      memo: str(t.memo, 100), pay: str(t.pay, 64), rec: t.rec ? str(t.rec, 64) : undefined, waste: !!t.waste,
       createdAt: Number(t.createdAt) || Date.now(), updatedAt: Number(t.updatedAt) || Date.now(),
       deleted: !!t.deleted, deletedAt: t.deleted ? Number(t.deletedAt) || Date.now() : undefined }));
   const pays = arr(raw.pays).filter((p) => p && typeof p.id === 'string').map((p) => ({ id: str(p.id, 64), name: str(p.name, 20) || '名称なし' }));
@@ -144,17 +145,34 @@ export function sanitizeState(raw) {
       cat: str(r.cat, 64), memo: str(r.memo, 100), pay: str(r.pay, 64),
       day: Math.min(31, Math.max(1, parseInt(r.day, 10) || 1)), startYm: isYm(r.startYm) ? r.startYm : ymOf(dateStr()),
       lastYm: isYm(r.lastYm) ? r.lastYm : null, active: r.active !== false }));
-  const log = arr(raw.log).filter((l) => l && typeof l.id === 'string').slice(-MAX_LOG);
+  const log = arr(raw.log).filter((l) => l && typeof l.id === 'string' && Number.isFinite(l.at)).slice(-MAX_LOG)
+    .map((l) => ({ id: str(l.id, 64), at: l.at, act: str(l.act, 16), kind: str(l.kind, 16), ref: typeof l.ref === 'string' ? str(l.ref, 64) : null,
+      summary: str(l.summary, 200), before: txFields(l.before) || undefined, after: txFields(l.after) || undefined }));
   return {
     v: 1, tx, cats, pays, favs, recs, log,
     budget: { monthly: validAmount(raw.budget?.monthly) ? raw.budget.monthly : 0 },
     settings: {
-      autoLockMin: [1, 3, 5, 10, 30].includes(raw.settings?.autoLockMin) ? raw.settings.autoLockMin : 5,
-      lastPay: typeof raw.settings?.lastPay === 'string' ? raw.settings.lastPay : null,
+      autoLockMin: LOCK_OPTIONS.includes(raw.settings?.autoLockMin) ? raw.settings.autoLockMin : 10,
+      lastPay: typeof raw.settings?.lastPay === 'string' && pays.some((p) => p.id === raw.settings.lastPay) ? raw.settings.lastPay : null,
       lastBackupAt: Number(raw.settings?.lastBackupAt) || 0,
       installHintHidden: !!raw.settings?.installHintHidden,
     },
   };
+}
+
+// 取引として正しい形なら必要な項目だけを返す（履歴の「変更前に戻す」で使用）
+export function txFields(t) {
+  if (!t || typeof t !== 'object' || !validAmount(t.amount) || !isDate(t.date) || (t.type !== 'expense' && t.type !== 'income')) return null;
+  return { type: t.type, amount: t.amount, cat: str(t.cat, 64), date: t.date, memo: str(t.memo, 100), pay: str(t.pay, 64), waste: !!t.waste };
+}
+
+// よく使うカテゴリ（直近90日の件数順）
+export function frequentCats(s, type, n = 4) {
+  const since = addDays(dateStr(), -90);
+  const cnt = new Map();
+  for (const t of liveTx(s)) if (t.type === type && t.date >= since) cnt.set(t.cat, (cnt.get(t.cat) || 0) + 1);
+  return [...cnt.entries()].filter(([id]) => s.cats.some((c) => c.id === id && !c.archived && !c.system))
+    .sort((a, b) => b[1] - a[1]).slice(0, n).map(([id]) => id);
 }
 
 // ---- 固定費（毎月の自動記録）----
@@ -191,9 +209,9 @@ function csvCell(v) {
 export function toCSV(s) {
   const catName = (id) => s.cats.find((c) => c.id === id)?.name ?? '';
   const payName = (id) => s.pays.find((p) => p.id === id)?.name ?? '';
-  const rows = [['日付', '種類', 'カテゴリ', '金額', '支払い方法', 'メモ']];
+  const rows = [['日付', '種類', 'カテゴリ', '金額', '支払い方法', 'メモ', 'ムダ遣い']];
   for (const t of liveTx(s).sort((a, b) => a.date.localeCompare(b.date))) {
-    rows.push([t.date, t.type === 'income' ? '収入' : '支出', catName(t.cat), t.amount, payName(t.pay), t.memo]);
+    rows.push([t.date, t.type === 'income' ? '収入' : '支出', catName(t.cat), t.amount, payName(t.pay), t.memo, t.waste ? '○' : '']);
   }
   return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
 }

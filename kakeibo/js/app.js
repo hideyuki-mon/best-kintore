@@ -1,6 +1,7 @@
 // 家計簿アプリ本体
 // 方針: 外部通信なし / innerHTML 不使用（文字列はすべて textContent で表示）/ 鍵とデータはロック中メモリに残さない
 import { deriveKey, encryptJSON, decryptJSON, randomBytes, b64e, b64d, PBKDF2_ITER } from './crypto.js';
+import { LOCK_OPTIONS, txFields, frequentCats } from './model.js';
 import * as db from './db.js';
 import {
   defaultState, sanitizeState, processRecurring, toCSV, UNCAT, MAX_LOG, MAX_AMOUNT,
@@ -12,7 +13,10 @@ import {
 let S = null;      // 復号済みデータ（ロック中は null）
 let KEY = null;    // AES鍵（ロック中は null）
 let META = null;   // { salt, iter, kind }
-const ui = { view: 'home', sub: null, ym: ymOf(dateStr()), q: '', type: 'all', onlyUncat: false, histFilter: 'all', catTab: 'expense' };
+let REV = 0;       // 保存済みデータの版番号（別画面での上書き検知用）
+const freshUi = () => ({ view: 'home', sub: null, ym: ymOf(dateStr()), q: '', type: 'all', onlyUncat: false, cat: null, histFilter: 'all', catTab: 'expense' });
+let ui = freshUi();
+let stickyDate = null; // まとめ入力用：直前に選んだ過去の日付 { date, at }
 const $app = document.getElementById('app');
 const uid = () => crypto.randomUUID();
 const clone = (o) => (o === undefined ? undefined : JSON.parse(JSON.stringify(o)));
@@ -43,16 +47,27 @@ const btn = (label, onClick, cls = 'btn', extra = {}) => h('button', { type: 'bu
 
 // ================= トースト（取り消し付き） =================
 let toastTimer = null;
-function toast(msg, action) {
+// actions: { label, fn } または その配列。ロック中は操作を無視する
+function toast(msg, actions) {
+  const acts = [].concat(actions || []);
   let box = document.getElementById('toast');
   if (!box) { box = h('div', { id: 'toast', class: 'toast', role: 'status', 'aria-live': 'polite' }); document.body.append(box); }
-  box.replaceChildren(...[h('span', { class: 'toast-msg' }, msg),
-    action ? btn(action.label, () => { hideToast(); action.fn(); }, 'toast-act') : null].filter(Boolean));
+  box.replaceChildren(h('span', { class: 'toast-msg' }, msg),
+    acts.length ? h('span', { class: 'toast-acts' }, acts.map((a) => btn(a.label, () => { hideToast(); if (S && KEY) a.fn(); }, 'toast-act'))) : null);
+  box.classList.toggle('multi', acts.length > 1);
+  box.hidden = false;
   box.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(hideToast, action ? 7000 : 3500);
+  toastTimer = setTimeout(hideToast, acts.length ? 8000 : 3000);
 }
-function hideToast() { document.getElementById('toast')?.classList.remove('show'); }
+function hideToast() {
+  clearTimeout(toastTimer);
+  const box = document.getElementById('toast');
+  if (!box) return;
+  box.classList.remove('show');
+  setTimeout(() => { if (!box.classList.contains('show')) { box.hidden = true; box.replaceChildren(); } }, 250);
+}
+function removeToast() { clearTimeout(toastTimer); document.getElementById('toast')?.remove(); }
 
 // ================= シート（下から出る画面） =================
 let sheetEl = null;
@@ -60,9 +75,10 @@ let sheetRender = null;
 let lastFocus = null;
 function openSheet(renderFn) {
   closeSheet(true);
+  hideToast();
   lastFocus = document.activeElement;
   sheetRender = renderFn;
-  sheetEl = h('div', { class: 'overlay', onClick: (e) => { if (e.target === sheetEl) closeSheet(); } });
+  sheetEl = h('div', { class: 'overlay', onClick: (e) => { if (e.target === sheetEl) dismissSheet(); } });
   document.body.append(sheetEl);
   document.body.classList.add('noscroll');
   refreshSheet(true);
@@ -82,6 +98,7 @@ function closeSheet(silent) {
   document.body.classList.remove('noscroll');
   if (!silent && lastFocus && document.contains(lastFocus)) lastFocus.focus();
 }
+function dismissSheet() { if (addState && addState.step === 2) closeAdd(); else closeSheet(); }
 function sheetHead(title, opts = {}) {
   return h('div', { class: 'sheet-head' },
     btn(opts.backLabel || '閉じる', opts.onBack || (() => closeSheet()), 'link-btn'),
@@ -123,12 +140,19 @@ function save() {
   const data = S;
   saveChain = saveChain
     .then(async () => {
+      if (KEY !== key) return; // ロックや鍵の切り替え後は書かない
       const { iv, ct } = await encryptJSON(key, data);
-      await db.putVault({ iv, ct, savedAt: Date.now() });
+      if (KEY !== key) return;
+      await db.putVault({ iv, ct, savedAt: Date.now(), rev: REV + 1 }, REV);
+      REV += 1;
     })
     .catch((e) => {
       console.error(e);
-      toast('保存できませんでした。空き容量を確認してください');
+      if (e && e.name === 'ConflictError') {
+        lock('別の画面（タブ）でデータが更新されたため、安全のためロックしました。もう一度開いてください');
+      } else {
+        toast('保存できませんでした。空き容量を確認してください');
+      }
     });
   return saveChain;
 }
@@ -146,24 +170,38 @@ const activeCats = (type) => S.cats.filter((c) => c.type === type && !c.archived
 
 // ================= 取引操作（すべて履歴に残す） =================
 function createTx(data, { silent } = {}) {
+  if (!validAmount(data.amount) || !data.cat) { toast('金額とカテゴリを確認してください'); return null; }
   const t = { id: uid(), ...data, createdAt: Date.now(), updatedAt: Date.now(), deleted: false };
   S.tx.push(t);
   if (t.pay) S.settings.lastPay = t.pay;
   addLog('create', 'tx', t.id, txLabel(t), null, t);
   save(); render();
   if (!silent) {
-    toast(`記録しました：${txLabel(t)}`, { label: '取り消す', fn: () => {
+    const undo = { label: '取り消す', fn: () => {
       const i = S.tx.findIndex((x) => x.id === t.id);
       if (i >= 0) S.tx.splice(i, 1);
       addLog('undo', 'tx', t.id, `記録を取り消し：${txLabel(t)}`, t, null);
       save(); render();
-    } });
+    } };
+    // 同じ内容を3回以上記録していたら「よく使う」への追加を提案
+    const same = liveTx(S).filter((x) => x.type === t.type && x.cat === t.cat && x.amount === t.amount && (x.memo || '') === (t.memo || '')).length;
+    const isFav = S.favs.some((f) => f.type === t.type && f.cat === t.cat && f.amount === t.amount && (f.memo || '') === (t.memo || ''));
+    if (same >= 3 && !isFav && t.cat !== UNCAT[t.type]) {
+      toast(`記録しました：${txLabel(t)}（よく使う記録ですね）`, [{ label: '⭐ワンタップに', fn: () => {
+        S.favs.push({ id: uid(), type: t.type, amount: t.amount, cat: t.cat, memo: t.memo || '', pay: t.pay || '' });
+        addLog('create', 'fav', null, `よく使うに追加：${txLabel(t)}`);
+        save(); render(); toast('ホームの「よく使う」に追加しました');
+      } }, undo]);
+    } else {
+      toast(`記録しました：${txLabel(t)}`, [undo, { label: 'メモ等', fn: () => openEdit(t.id) }]);
+    }
   }
   return t;
 }
 function updateTx(id, patch, { verb = '変更しました' } = {}) {
   const t = S.tx.find((x) => x.id === id);
   if (!t) return;
+  if (!validAmount(patch.amount ?? t.amount) || !(patch.cat ?? t.cat)) { toast('金額とカテゴリを確認してください'); return; }
   const before = clone(t);
   Object.assign(t, patch, { updatedAt: Date.now() });
   addLog('update', 'tx', id, txLabel(t), before, t);
@@ -182,8 +220,11 @@ function deleteTx(id) {
   addLog('delete', 'tx', id, txLabel(t), { ...t, deleted: false }, null);
   save(); render();
   toast(`ゴミ箱へ移しました：${txLabel(t)}`, { label: '元に戻す', fn: () => restoreTx(id) });
+  recentlyDeleted = { id, at: Date.now() };
 }
+let recentlyDeleted = null; // ホームに「さっき消した記録を戻す」を少しの間出す
 function restoreTx(id) {
+  if (recentlyDeleted?.id === id) recentlyDeleted = null;
   const t = S.tx.find((x) => x.id === id);
   if (!t) return;
   t.deleted = false; delete t.deletedAt; t.updatedAt = Date.now();
@@ -194,6 +235,8 @@ function restoreTx(id) {
 
 // ================= 起動・ロック =================
 async function boot() {
+  // 他サイトに埋め込まれていたら表示しない（クリックジャッキング対策）
+  if (window.top !== window.self) { $app.replaceChildren(); return; }
   await applyThemeFromPrefs();
   if (!window.isSecureContext || !crypto.subtle) {
     $app.replaceChildren(h('main', { class: 'center-screen' },
@@ -210,13 +253,33 @@ async function boot() {
       h('p', null, 'プライベートブラウズでは使えません。通常のSafariで開くか、ホーム画面のアイコンから起動してください。')));
     return;
   }
-  if (!META) renderSetup(); else renderLock();
+  if (META) renderLock();
+  else if (isIOS() && !isStandalone()) renderInstallFirst();
+  else renderSetup();
 }
 
+// iPhone では Safari とホーム画面アプリで保存場所が別。先にホーム画面へ追加してもらう
+function renderInstallFirst() {
+  $app.replaceChildren(h('main', { class: 'center-screen' },
+    h('div', { class: 'hero-icon', 'aria-hidden': 'true' }, '📲'),
+    h('h1', null, 'まずホーム画面に追加'),
+    h('ol', { class: 'promise steps' },
+      h('li', null, '画面下の ', h('b', null, '共有ボタン（□に↑）'), ' をタップ'),
+      h('li', null, h('b', null, '「ホーム画面に追加」'), ' をタップ'),
+      h('li', null, 'ホーム画面の ', h('b', null, '「家計簿」アイコン'), ' から開く')),
+    h('p', { class: 'help' }, 'Safariのままだとデータが別の場所に保存され、しばらく使わないと消えることがあります。'),
+    btn('Safariのまま使う（おすすめしません）', () => renderSetup(), 'link-btn center')));
+}
+
+// 別のタブで開かれたら、こちらはロックする（同時編集による上書きを防ぐ）
+const channel = 'BroadcastChannel' in window ? new BroadcastChannel('kakeibo') : null;
+if (channel) channel.onmessage = (e) => { if (e.data === 'unlocked' && S) lock('別の画面で開かれたため、ロックしました'); };
+
 function lock(reason) {
-  KEY = null; S = null;
-  closeSheet(true); hideToast();
-  ui.view = 'home'; ui.sub = null;
+  KEY = null; S = null; REV = 0;
+  clearTimeout(idleTimer);
+  closeSheet(true); removeToast();
+  ui = freshUi(); stickyDate = null; recentlyDeleted = null; addState = null;
   renderLock(reason);
 }
 
@@ -228,8 +291,9 @@ async function tryUnlock(pass) {
   const key = await deriveKey(pass, META.salt, META.iter);
   let state = null;
   let recovered = false;
+  const vaultRec = await db.get('vault');
   try {
-    state = await decryptJSON(key, await db.get('vault'));
+    state = await decryptJSON(key, vaultRec || {});
   } catch {
     try { const prev = await db.get('vault_prev'); if (prev) { state = await decryptJSON(key, prev); recovered = true; } } catch { /* 不一致 */ }
   }
@@ -242,7 +306,9 @@ async function tryUnlock(pass) {
   const missed = guard.failsSinceUnlock || 0;
   await db.put('guard', { fails: 0, lockUntil: 0, failsSinceUnlock: 0 });
   KEY = key;
+  REV = vaultRec?.rev || 0;
   S = sanitizeState(state);
+  channel?.postMessage('unlocked');
   if (missed > 0) addLog('security', 'security', null, `前回のロック解除以降、パスコードの間違いが${missed}回ありました`);
   const added = processRecurring(S);
   for (const t of added) addLog('auto', 'tx', t.id, `固定費を自動記録：${txLabel(t)}`, null, t);
@@ -266,8 +332,13 @@ function resetIdle() {
   idleTimer = setTimeout(() => lock('しばらく操作がなかったのでロックしました'), S.settings.autoLockMin * 60e3);
 }
 ['pointerdown', 'keydown'].forEach((ev) => document.addEventListener(ev, () => { if (S) resetIdle(); }, { passive: true }));
+// アプリ切り替え画面のスナップショットに金額が写らないよう、隠れる瞬間に目隠しする
+const setCover = (on) => document.body.classList.toggle('privacy', on);
+window.addEventListener('pagehide', () => { if (S) setCover(true); });
+window.addEventListener('pageshow', () => setCover(false));
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (document.hidden) { hiddenAt = Date.now(); if (S) setCover(true); return; }
+  setCover(false);
   if (!S) return;
   if (Date.now() - hiddenAt >= S.settings.autoLockMin * 60e3) { lock(); return; }
   resetIdle();
@@ -281,6 +352,14 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ================= 初回設定 =================
+// パスコードの強さチェック（初回・変更で共通）
+function passProblem(v, kind) {
+  if (v.length < 6) return '6文字以上にしてください';
+  if (kind === 'pin' && !/^\d+$/.test(v)) return '数字だけで入力してください';
+  if (/^(.)\1+$/.test(v) || '01234567890123'.includes(v) || '98765432109876'.includes(v) || /^(\d\d)\1+$/.test(v)) return '同じ数字の連続や「123456」は推測されやすいので避けてください';
+  return '';
+}
+
 function renderSetup() {
   let step = 0, kind = 'pin', p1 = '', err = '';
   const draw = () => {
@@ -288,12 +367,25 @@ function renderSetup() {
       $app.replaceChildren(h('main', { class: 'center-screen' },
         h('div', { class: 'hero-icon', 'aria-hidden': 'true' }, '📒'),
         h('h1', null, 'ようこそ'),
-        h('p', { class: 'lead' }, 'かんたんに続けられる家計簿です。'),
+        h('p', { class: 'lead' }, '金額とカテゴリを押すだけの、続けやすい家計簿です。'),
         h('ul', { class: 'promise' },
-          h('li', null, h('b', null, '📱 この端末の中だけ'), 'に保存。どこにも送信しません。'),
-          h('li', null, h('b', null, '🔒 パスコードで暗号化'), 'します。'),
-          h('li', null, h('b', null, '⚠️ パスコードを忘れると'), '誰にも復元できません。バックアップ機能を使ってください。')),
+          h('li', null, h('b', null, '📱 この端末の中だけに保存'), 'どこにも送信しません。'),
+          h('li', null, h('b', null, '🔒 パスコードで守ります'), 'iPhoneの「パスワード」に保存すれば、Face IDで開けます。')),
         btn('はじめる', () => { step = 1; draw(); }, 'btn btn-primary btn-big')));
+      return;
+    }
+    if (step === 3) {
+      let budget = 0;
+      $app.replaceChildren(h('main', { class: 'center-screen' },
+        h('div', { class: 'hero-icon', 'aria-hidden': 'true' }, '🎯'),
+        h('h1', null, '1か月に使えるのは？'),
+        h('p', { class: 'help' }, 'だいたいでOK。ホームに「今月あといくら使えるか」が出ます。あとで変えられます。'),
+        amountField('1か月の予算', 0, (v) => { budget = v; }, { placeholder: '例：150000' }),
+        btn('これで始める', () => {
+          if (budget) { S.budget.monthly = budget; addLog('update', 'budget', null, `月の予算を ${yen(budget)} に設定`); save(); }
+          finishSetup();
+        }, 'btn btn-primary btn-big'),
+        btn('あとで決める', finishSetup, 'link-btn center')));
       return;
     }
     const isConfirm = step === 2;
@@ -306,24 +398,24 @@ function renderSetup() {
       e.preventDefault();
       const v = input.value;
       if (!isConfirm) {
-        if (v.length < 6) { err = '6文字以上にしてください'; draw(); return; }
-        if (kind === 'pin' && !/^\d+$/.test(v)) { err = '数字だけで入力してください'; draw(); return; }
-        if (/^(\d)\1+$/.test(v) || '01234567890'.includes(v) || '9876543210'.includes(v)) { err = '同じ数字の連続や「123456」は推測されやすいので避けてください'; draw(); return; }
-        p1 = v; err = ''; step = 2; draw(); return;
+        err = passProblem(v, kind);
+        if (err) { draw(); return; }
+        p1 = v; step = 2; draw(); return;
       }
-      if (v !== p1) { err = '1回目と違います。もう一度最初から入力してください'; p1 = ''; step = 1; draw(); return; }
+      if (v !== p1) { err = '1回目と違いました。もう一度最初から入力してください'; p1 = ''; step = 1; draw(); return; }
       form.querySelector('button[type=submit]').disabled = true;
-      form.querySelector('.status').textContent = '暗号化の準備中…';
+      form.querySelector('.status').textContent = '準備中…';
       const salt = randomBytes(16);
       const key = await deriveKey(v, salt, PBKDF2_ITER);
       const state = defaultState();
       state.log.push({ id: uid(), at: Date.now(), act: 'security', kind: 'security', summary: 'アプリを使いはじめました' });
       const { iv, ct } = await encryptJSON(key, state);
       META = { salt, iter: PBKDF2_ITER, kind, createdAt: Date.now() };
-      await db.atomic({ meta: META, vault: { iv, ct, savedAt: Date.now() } });
-      KEY = key; S = state;
-      render(); startIdleWatch();
-      toast('準備できました。下の「＋記録」から始めましょう');
+      await db.atomic({ meta: META, vault: { iv, ct, savedAt: Date.now(), rev: 1 } });
+      KEY = key; S = state; REV = 1;
+      channel?.postMessage('unlocked');
+      startIdleWatch();
+      step = 3; draw();
     } },
     h('input', { type: 'text', name: 'username', autocomplete: 'username', value: '家計簿', class: 'visually-hidden', tabindex: '-1', 'aria-hidden': 'true' }),
     h('div', { class: 'hero-icon', 'aria-hidden': 'true' }, '🔒'),
@@ -331,14 +423,16 @@ function renderSetup() {
     h('label', { for: 'pass', class: 'field big-field' },
       h('span', null, isConfirm ? '確認のため、同じパスコードを入力' : 'パスコード（6文字以上）'), input),
     h('p', { id: 'pass-help', class: 'help' }, kind === 'pin' ? '数字6桁以上。長いほど安全です。' : '英数字・記号を使えます。'),
-    !isConfirm ? btn(kind === 'pin' ? '英数字で設定する' : '数字だけで設定する', () => { kind = kind === 'pin' ? 'text' : 'pin'; err = ''; draw(); }, 'link-btn') : null,
+    !isConfirm ? btn(kind === 'pin' ? '英数字で設定する（より安全）' : '数字だけで設定する', () => { kind = kind === 'pin' ? 'text' : 'pin'; err = ''; draw(); }, 'link-btn center') : null,
     err ? h('p', { class: 'error', role: 'alert' }, err) : null,
+    h('p', { class: 'help small' }, 'パスコードは忘れると元に戻せません。iPhoneが「パスワードを保存しますか？」と聞いてきたら「保存」がおすすめです。'),
     h('p', { class: 'status', 'aria-live': 'polite' }),
     h('button', { type: 'submit', class: 'btn btn-primary btn-big' }, isConfirm ? '設定する' : '次へ'),
-    isConfirm ? btn('戻る', () => { step = 1; p1 = ''; draw(); }, 'link-btn') : null);
+    isConfirm ? btn('戻る', () => { step = 1; p1 = ''; err = ''; draw(); }, 'link-btn center') : null);
     $app.replaceChildren(form);
     setTimeout(() => input.focus(), 50);
   };
+  const finishSetup = () => { render(); toast('準備できました。下の「＋」から記録してみましょう'); };
   draw();
 }
 
@@ -355,7 +449,7 @@ function renderLock(reason) {
       disabled: waitMs > 0, 'aria-invalid': err ? 'true' : null,
     });
     const status = h('p', { class: 'status', 'aria-live': 'polite' });
-    const submit = h('button', { type: 'submit', class: 'btn btn-primary btn-big', disabled: waitMs > 0 }, 'ひらく');
+    const submit = h('button', { type: 'submit', class: 'btn btn-primary btn-big', disabled: waitMs > 0 }, 'ロック解除');
     const form = h('form', { class: 'center-screen', onSubmit: async (e) => {
       e.preventDefault();
       if (!input.value) return;
@@ -364,7 +458,7 @@ function renderLock(reason) {
       const r = await tryUnlock(input.value);
       input.value = '';
       if (!r.ok) {
-        err = r.wait > 0 ? '間違いが続いたため、しばらく待ってから試してください' : 'パスコードが違います';
+        err = r.wait > 0 ? '' : 'パスコードが違います';
         draw();
       }
     } },
@@ -374,13 +468,13 @@ function renderLock(reason) {
     reason ? h('p', { class: 'help' }, reason) : null,
     h('label', { for: 'pass', class: 'field big-field' }, h('span', null, 'パスコード'), input),
     err ? h('p', { class: 'error', role: 'alert' }, err) : null,
-    waitMs > 0 ? h('p', { class: 'error', id: 'wait' }, `あと ${Math.ceil(waitMs / 1000)} 秒お待ちください`) : null,
+    waitMs > 0 ? h('p', { class: 'error', id: 'wait' }, `間違いが続いたため、あと ${Math.ceil(waitMs / 1000)} 秒で再入力できます`) : null,
     status,
     submit,
     btn('パスコードを忘れたとき', forgotFlow, 'link-btn'));
     $app.replaceChildren(form);
     clearInterval(countdown);
-    if (waitMs > 0) countdown = setInterval(() => { if (Date.now() >= guard.lockUntil) { clearInterval(countdown); err = ''; draw(); } else { const w = document.getElementById('wait'); if (w) w.textContent = `あと ${Math.ceil((guard.lockUntil - Date.now()) / 1000)} 秒お待ちください`; } }, 1000);
+    if (waitMs > 0) countdown = setInterval(() => { if (Date.now() >= guard.lockUntil) { clearInterval(countdown); err = ''; draw(); } else { const w = document.getElementById('wait'); if (w) w.textContent = `間違いが続いたため、あと ${Math.ceil((guard.lockUntil - Date.now()) / 1000)} 秒で再入力できます`; } }, 1000);
     else setTimeout(() => input.focus(), 50);
   };
   draw();
@@ -390,7 +484,8 @@ async function forgotFlow() {
   const ok = await confirmSheet({
     title: 'パスコードを忘れたとき',
     body: ['データは暗号化されているため、パスコードがないと誰にも（作者にも）開けません。',
-      'バックアップファイルがあれば、全部消してから「設定 → バックアップ」で復元できます（そのバックアップを作った時のパスコードが必要です）。',
+      'iPhoneの「設定 → パスワード」に「家計簿」として保存されていないか確認してください。',
+      'バックアップファイルがあれば、全部消してから「設定 → バックアップ」で復元できます（バックアップ用パスワードが必要です）。',
       'すべてのデータを消して、最初からやり直しますか？'],
     ok: 'すべて消してやり直す', danger: true, typed: '削除',
   });
@@ -443,14 +538,24 @@ function pageHead(title, right) {
 }
 function monthNav() {
   const cur = ymOf(dateStr());
+  const latest = liveTx(S).reduce((m, t) => (t.date > m ? t.date : m), '');
+  const maxYm = latest && ymOf(latest) > cur ? ymOf(latest) : cur;
   return h('div', { class: 'month-nav' },
     btn('‹', () => { ui.ym = ymAdd(ui.ym, -1); render(); }, 'icon-btn', { 'aria-label': '前の月' }),
     h('strong', { 'aria-live': 'polite' }, ymLabel(ui.ym)),
-    btn('›', () => { ui.ym = ymAdd(ui.ym, 1); render(); }, 'icon-btn', { 'aria-label': '次の月', disabled: ui.ym >= cur }),
+    btn('›', () => { ui.ym = ymAdd(ui.ym, 1); render(); }, 'icon-btn', { 'aria-label': '次の月', disabled: ui.ym >= maxYm }),
     ui.ym !== cur ? btn('今月', () => { ui.ym = cur; render(); }, 'chip') : null);
 }
 
 // ================= ホーム =================
+function trio(tot) {
+  return h('section', { class: 'trio' },
+    h('div', null, h('span', null, '収入'), h('b', { class: 'income' }, yen(tot.income))),
+    h('div', null, h('span', null, '支出'), h('b', null, yen(tot.expense))),
+    h('div', null, h('span', null, '収支'), h('b', { class: tot.balance >= 0 ? 'income' : 'minus' }, signedYen(tot.balance))));
+}
+const go = (view, sub = null, extra = {}) => { Object.assign(ui, { view, sub }, extra); render(); window.scrollTo(0, 0); };
+
 function viewHome() {
   const ym = ymOf(dateStr());
   const tot = monthTotals(S, ym);
@@ -469,7 +574,7 @@ function viewHome() {
     const over = left < 0;
     hero = h('section', { class: 'card hero' + (over ? ' over' : '') },
       h('p', { class: 'hero-label' }, over ? '⚠️ 今月の予算を超えています' : '今月あと使えるお金'),
-      h('p', { class: 'hero-num' }, over ? yen(-left) + ' オーバー' : yen(left)),
+      h('p', { class: 'hero-num' }, over ? yen(-left) : yen(left), over ? h('span', { class: 'hero-unit' }, ' オーバー') : null),
       h('div', { class: 'meter', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(pct), 'aria-label': '予算の使用率' },
         h('div', { class: 'meter-fill', width: pct + '%' })),
       h('p', { class: 'hero-sub' }, over ? `予算 ${yen(budget)} ／ 使った ${yen(tot.expense)}`
@@ -478,37 +583,46 @@ function viewHome() {
     hero = h('section', { class: 'card hero' },
       h('p', { class: 'hero-label' }, '今月使ったお金'),
       h('p', { class: 'hero-num' }, yen(tot.expense)),
-      btn('予算を決めると「あといくら」が出ます →', () => { ui.view = 'settings'; ui.sub = 'budget'; render(); }, 'link-btn'));
+      btn('予算を決めると「あといくら」が出ます →', () => go('settings', 'budget'), 'link-btn'));
   }
 
-  const backupOld = S.tx.length >= 10 && Date.now() - (S.settings.lastBackupAt || 0) > 30 * 864e5;
-  const showInstall = isIOS() && !isStandalone() && !S.settings.installHintHidden;
+  // お知らせは一度に1つだけ（優先度順）
+  const sinceBackup = Date.now() - (S.settings.lastBackupAt || 0);
+  const liveN = liveTx(S).length;
+  const needBackup = liveN >= 10 && (S.settings.lastBackupAt ? sinceBackup > 14 * 864e5 : true);
+  let notice = null;
+  if (recentlyDeleted && Date.now() - recentlyDeleted.at < 120e3 && S.tx.some((t) => t.id === recentlyDeleted.id && t.deleted)) {
+    const t = S.tx.find((x) => x.id === recentlyDeleted.id);
+    notice = h('button', { type: 'button', class: 'card notice action-card', onClick: () => restoreTx(t.id) }, `↩️ さっき消した「${txLabel(t)}」を戻す`);
+  } else if (uncat > 0) {
+    notice = h('button', { type: 'button', class: 'card notice action-card', onClick: () => go('list', null, { onlyUncat: true, q: '', type: 'all', cat: null }) },
+      `❓ 未分類が ${uncat}件 → ひまなときに整理`);
+  } else if (needBackup) {
+    notice = h('button', { type: 'button', class: 'card notice action-card', onClick: () => go('settings', 'backup') },
+      '💾 データを守るためにバックアップしませんか →');
+  } else if (isIOS() && !isStandalone() && !S.settings.installHintHidden) {
+    notice = h('div', { class: 'card notice slim' },
+      h('p', null, '📲 共有ボタン →「ホーム画面に追加」でアプリのように使えます'),
+      btn('×', () => { S.settings.installHintHidden = true; save(); render(); }, 'icon-btn small', { 'aria-label': '閉じる' }));
+  }
 
   return [
-    pageHead(`${Number(ym.slice(5))}月の家計簿`, btn('🔒 ロック', () => lock(), 'chip', { 'aria-label': '今すぐロックする' })),
-    showInstall ? h('section', { class: 'card notice' },
-      h('p', null, h('b', null, '📲 ホーム画面に追加すると、アプリのように使えます')),
-      h('p', { class: 'help' }, 'Safari 下の「共有」ボタン → 「ホーム画面に追加」'),
-      btn('閉じる', () => { S.settings.installHintHidden = true; save(); render(); }, 'link-btn')) : null,
+    pageHead(`${Number(ym.slice(5))}月の家計簿`),
     hero,
-    h('section', { class: 'trio' },
-      h('div', null, h('span', null, '収入'), h('b', { class: 'income' }, yen(tot.income))),
-      h('div', null, h('span', null, '支出'), h('b', null, yen(tot.expense))),
-      h('div', null, h('span', null, '収支'), h('b', { class: tot.balance >= 0 ? 'income' : 'minus' }, signedYen(tot.balance)))),
+    trio(tot),
     h('section', { class: 'card status-card' + (recordedToday ? ' done' : '') },
       recordedToday
         ? h('p', null, `✅ 今日も記録できました${st > 1 ? `（${st}日連続）` : ''}`)
         : h('p', null, '📝 今日はまだ記録していません。1件だけでもOK！')),
-    uncat > 0 ? h('button', { type: 'button', class: 'card notice action-card', onClick: () => { ui.view = 'list'; ui.onlyUncat = true; ui.q = ''; ui.type = 'all'; render(); } },
-      `❓ カテゴリ未分類が ${uncat}件 あります → あとで整理する`) : null,
-    backupOld ? h('button', { type: 'button', class: 'card notice action-card', onClick: () => { ui.view = 'settings'; ui.sub = 'backup'; render(); } },
-      '💾 しばらくバックアップしていません → 今すぐ保存') : null,
-    S.favs.length ? h('section', null,
+    notice,
+    h('section', null,
       h('h2', { class: 'section-title' }, 'よく使う（タップですぐ記録）'),
-      h('div', { class: 'fav-row' }, S.favs.map((f) => h('button', { type: 'button', class: 'fav', onClick: () => {
-        createTx({ type: f.type, amount: f.amount, cat: f.cat, date: dateStr(), memo: f.memo, pay: f.pay });
-      } }, h('span', { class: 'fav-emoji', 'aria-hidden': 'true' }, catOf(f.cat).emoji),
-      h('span', null, f.memo || catOf(f.cat).name), h('b', null, yen(f.amount)))))) : null,
+      S.favs.length
+        ? h('div', { class: 'fav-row' }, S.favs.map((f) => h('button', { type: 'button', class: 'fav', onClick: () => {
+          createTx({ type: f.type, amount: f.amount, cat: f.cat, date: dateStr(), memo: f.memo, pay: payOf(f.pay) ? f.pay : '' });
+        } }, h('span', { class: 'fav-emoji', 'aria-hidden': 'true' }, catOf(f.cat).emoji),
+        h('span', null, f.memo || catOf(f.cat).name), h('b', null, yen(f.amount)))))
+        : btn('＋ コンビニ・ランチなどをワンタップ記録にする', () => go('settings', 'favs'), 'link-btn')),
     h('section', null,
       h('h2', { class: 'section-title' }, '今日の記録'),
       todayTx.length ? txListEl(todayTx) : h('p', { class: 'empty' }, 'まだありません')),
@@ -528,67 +642,92 @@ function txListEl(list, showDate) {
     return h('li', null, h('button', { type: 'button', class: 'tx', onClick: () => openEdit(t.id), 'aria-label': `${c.name} ${yen(t.amount)} ${t.type === 'income' ? '収入' : '支出'} 編集する` },
       h('span', { class: 'tx-emoji', 'aria-hidden': 'true' }, c.emoji),
       h('span', { class: 'tx-main' },
-        h('span', { class: 'tx-cat' }, c.name, t.rec ? h('span', { class: 'badge' }, '固定費') : null),
+        h('span', { class: 'tx-cat' }, c.name, t.rec ? h('span', { class: 'badge' }, '固定費') : null, t.waste ? h('span', { class: 'badge' }, '😇ムダ') : null),
         h('span', { class: 'tx-sub' }, [showDate ? dayLabel(t.date) : null, p?.name, t.memo].filter(Boolean).join(' ・ '))),
       h('span', { class: 'tx-amt' + (t.type === 'income' ? ' income' : '') }, (t.type === 'income' ? '+' : '') + yen(t.amount))));
   }));
 }
 
 // ================= 一覧 =================
+// 検索・未分類・カテゴリで絞り込んでいるときは全期間が対象
 function viewList() {
   const results = h('div', { id: 'list-results' });
+  const allTime = () => !!(ui.q.trim() || ui.onlyUncat);
   const fill = () => {
-    let list = txOfMonth(S, ui.ym);
+    let list = allTime() ? liveTx(S) : txOfMonth(S, ui.ym);
     if (ui.type !== 'all') list = list.filter((t) => t.type === ui.type);
     if (ui.onlyUncat) list = list.filter((t) => t.cat === UNCAT.expense || t.cat === UNCAT.income);
+    if (ui.cat) list = list.filter((t) => t.cat === ui.cat);
     const q = ui.q.trim().toLowerCase();
     if (q) list = list.filter((t) => [catOf(t.cat).name, t.memo, payOf(t.pay)?.name, String(t.amount)].join(' ').toLowerCase().includes(q));
     list.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
-    if (!list.length) { results.replaceChildren(h('p', { class: 'empty' }, q || ui.onlyUncat || ui.type !== 'all' ? '条件に合う記録はありません' : 'この月の記録はまだありません')); return; }
+    const scope = h('p', { class: 'help pad' }, allTime() ? `全期間から ${list.length}件` : `${ymLabel(ui.ym)}：${list.length}件`);
+    if (!list.length) { results.replaceChildren(scope, h('p', { class: 'empty' }, q || ui.onlyUncat || ui.cat || ui.type !== 'all' ? '条件に合う記録はありません' : 'この月の記録はまだありません')); return; }
     const groups = new Map();
-    for (const t of list) { if (!groups.has(t.date)) groups.set(t.date, []); groups.get(t.date).push(t); }
-    results.replaceChildren(...[...groups.entries()].map(([d, items]) => {
+    for (const t of list.slice(0, 500)) { if (!groups.has(t.date)) groups.set(t.date, []); groups.get(t.date).push(t); }
+    results.replaceChildren(scope, ...[...groups.entries()].map(([d, items]) => {
       const exp = items.filter((t) => t.type === 'expense').reduce((a, t) => a + t.amount, 0);
       return h('section', { class: 'day-group' },
-        h('h2', { class: 'day-head' }, h('span', null, dayLabel(d)), exp ? h('span', null, '支出 ' + yen(exp)) : null),
+        h('h2', { class: 'day-head' }, h('span', null, (allTime() && ymOf(d) !== ymOf(dateStr()) ? d.slice(0, 4) + '年 ' : '') + dayLabel(d)), exp ? h('span', null, '支出 ' + yen(exp)) : null),
         txListEl(items));
     }));
+    if (list.length > 500) results.append(h('p', { class: 'help center' }, '新しい500件を表示しています。検索で絞り込んでください'));
   };
   fill();
-  const tot = monthTotals(S, ui.ym);
   const chip = (label, active, onClick) => h('button', { type: 'button', class: 'chip' + (active ? ' active' : ''), 'aria-pressed': active ? 'true' : 'false', onClick }, label);
+  const trashN = S.tx.filter((t) => t.deleted).length;
   return [
     pageHead('記録の一覧'),
-    monthNav(),
-    h('section', { class: 'trio' },
-      h('div', null, h('span', null, '収入'), h('b', { class: 'income' }, yen(tot.income))),
-      h('div', null, h('span', null, '支出'), h('b', null, yen(tot.expense))),
-      h('div', null, h('span', null, '収支'), h('b', { class: tot.balance >= 0 ? 'income' : 'minus' }, signedYen(tot.balance)))),
+    allTime() ? null : monthNav(),
+    allTime() ? null : trio(monthTotals(S, ui.ym)),
     h('label', { class: 'search' }, h('span', { class: 'visually-hidden' }, '検索'),
-      h('input', { type: 'search', placeholder: '🔍 メモ・カテゴリ・金額で探す', value: ui.q, enterkeyhint: 'search', onInput: (e) => { ui.q = e.target.value; fill(); } })),
+      h('input', { type: 'search', placeholder: '🔍 メモ・金額で検索（全期間）', value: ui.q, enterkeyhint: 'search', onInput: (e) => {
+        const was = allTime(); ui.q = e.target.value;
+        if (was !== allTime()) { render(); document.querySelector('.search input')?.focus(); } else fill();
+      } })),
     h('div', { class: 'chip-row' },
-      chip('すべて', ui.type === 'all' && !ui.onlyUncat, () => { ui.type = 'all'; ui.onlyUncat = false; render(); }),
+      chip('すべて', ui.type === 'all' && !ui.onlyUncat && !ui.cat, () => { ui.type = 'all'; ui.onlyUncat = false; ui.cat = null; render(); }),
       chip('支出', ui.type === 'expense', () => { ui.type = 'expense'; render(); }),
       chip('収入', ui.type === 'income', () => { ui.type = 'income'; render(); }),
-      chip('❓未分類', ui.onlyUncat, () => { ui.onlyUncat = !ui.onlyUncat; render(); })),
+      chip('❓未分類', ui.onlyUncat, () => { ui.onlyUncat = !ui.onlyUncat; render(); }),
+      ui.cat ? chip(`${catOf(ui.cat).emoji} ${catOf(ui.cat).name} ×`, true, () => { ui.cat = null; render(); }) : null),
     results,
+    trashN ? btn(`🗑 ゴミ箱（${trashN}件）`, () => go('settings', 'trash'), 'link-btn center') : null,
   ];
 }
 
 // ================= 記録（追加・編集） =================
 let addState = null;
+const STICKY_MS = 10 * 60e3;
 function openAdd(preset = {}) {
   closeSheet(true);
-  addState = { mode: 'new', step: 1, type: 'expense', amount: '', date: dateStr(), memo: '', pay: S.settings.lastPay || '', cat: null, ...preset };
+  const sticky = stickyDate && Date.now() - stickyDate.at < STICKY_MS ? stickyDate.date : null;
+  const pay = payOf(S.settings.lastPay) ? S.settings.lastPay : '';
+  addState = { mode: 'new', step: 1, type: 'expense', amount: '', date: sticky || dateStr(), memo: '', pay, cat: null, waste: false, ...preset };
   openSheet(renderAdd);
 }
 function openEdit(id) {
   const t = S.tx.find((x) => x.id === id);
   if (!t) return;
   closeSheet(true);
-  addState = { mode: 'edit', id, step: 2, type: t.type, amount: String(t.amount), date: t.date, memo: t.memo || '', pay: t.pay || '', cat: t.cat };
+  addState = { mode: 'edit', id, step: 2, type: t.type, amount: String(t.amount), date: t.date, memo: t.memo || '', pay: payOf(t.pay) ? t.pay : '', cat: t.cat, waste: !!t.waste };
+  addState.orig = JSON.stringify(editSnapshot(addState));
   openSheet(renderAdd);
 }
+const editSnapshot = (a) => ({ type: a.type, amount: a.amount, date: a.date, memo: a.memo.trim(), pay: a.pay, cat: a.cat, waste: a.waste });
+
+// 編集中に閉じようとしたら、変更があれば確認する
+async function closeAdd() {
+  const a = addState;
+  if (a && a.mode === 'edit' && JSON.stringify(editSnapshot(a)) !== a.orig && validAmount(Number(a.amount)) && a.cat) {
+    const snap = { ...a };
+    const keep = await confirmSheet({ title: '変更を保存しますか？', body: ['このまま閉じると、変更は保存されません。'], ok: '保存する' });
+    if (keep) updateTx(snap.id, txData(snap));
+    return;
+  }
+  closeSheet();
+}
+const txData = (a) => ({ type: a.type, amount: Number(a.amount), cat: a.cat, date: a.date, memo: a.memo.trim().slice(0, 100), pay: a.pay, waste: a.type === 'expense' && !!a.waste });
 
 function keypad(onKey) {
   const keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', '00', '0', '⌫'];
@@ -614,63 +753,87 @@ function renderAdd() {
       onClick: () => { if (a.type !== tp) { a.type = tp; a.cat = null; refreshSheet(); } } }, tp === 'expense' ? '支出' : '収入')));
 
   if (a.step === 1) {
+    if (a.mode === 'edit' && a.amountBefore == null) a.amountBefore = a.amount;
+    const backToStep2 = () => { if (!a.amount) a.amount = a.amountBefore; a.amountBefore = null; a.step = 2; refreshSheet(); };
     return [
-      sheetHead(a.mode === 'edit' ? '金額を直す' : '記録する', a.mode === 'edit' ? { backLabel: '‹ 戻る', onBack: () => { a.step = 2; refreshSheet(); } } : {}),
+      sheetHead(a.mode === 'edit' ? '金額を直す' : '記録する', a.mode === 'edit' ? { backLabel: '‹ 戻る', onBack: backToStep2 } : {}),
       h('div', { class: 'sheet-body add-step1' },
         typeToggle,
-        h('p', { class: 'step-hint' }, h('b', null, 'ステップ1'), ' 金額を入れる'),
         h('p', { class: 'amount-display' + (a.amount ? '' : ' zero'), 'aria-live': 'polite' }, yen(Number(a.amount || 0))),
         keypad(pressKey),
-        h('button', { type: 'button', id: 'next-btn', class: 'btn btn-primary btn-big', disabled: !a.amount, onClick: () => { a.step = 2; refreshSheet(true); } },
+        h('button', { type: 'button', id: 'next-btn', class: 'btn btn-primary btn-big', disabled: !a.amount, onClick: () => { a.amountBefore = null; a.step = 2; refreshSheet(true); } },
           a.mode === 'edit' ? 'この金額にする' : '次へ（カテゴリを選ぶ）')),
     ];
   }
 
   const amount = Number(a.amount);
   const today = dateStr();
-  const dateChips = [[today, '今日'], [addDays(today, -1), '昨日'], [addDays(today, -2), 'おととい']];
+  const dateChips = [[today, '今日'], [addDays(today, -1), '昨日'], [addDays(today, -2), 'おととい'], [addDays(today, -3), '3日前']];
   const isOther = !dateChips.some(([d]) => d === a.date);
+  const setDate = (d) => {
+    if (d > today) { toast('未来の日付は選べません'); return; }
+    a.date = d;
+    stickyDate = d !== today ? { date: d, at: Date.now() } : null;
+    refreshSheet();
+  };
   const chooseCat = (catId) => {
+    if (!validAmount(amount)) { a.step = 1; refreshSheet(); return; }
+    if (!catId) return;
     a.cat = catId;
-    const data = { type: a.type, amount, cat: catId, date: a.date, memo: a.memo.trim().slice(0, 100), pay: a.pay };
-    if (a.mode === 'new') { closeSheet(); createTx(data); }
-    else { closeSheet(); updateTx(a.id, data); }
+    const data = txData(a);
+    if (stickyDate) stickyDate.at = Date.now();
+    closeSheet();
+    if (a.mode === 'new') createTx(data); else updateTx(a.id, data);
   };
   const tx = a.mode === 'edit' ? S.tx.find((x) => x.id === a.id) : null;
   const hist = tx ? S.log.filter((l) => l.kind === 'tx' && l.ref === tx.id).slice().reverse() : [];
+  const freq = a.mode === 'new' ? frequentCats(S, a.type) : [];
+  const later = activeCats(a.type).find((c) => c.system);
+  const catBtn = (c) => h('button', { type: 'button', class: 'cat' + (a.cat === c.id ? ' selected' : ''), 'aria-pressed': a.cat === c.id ? 'true' : 'false', onClick: () => chooseCat(c.id) },
+    h('span', { class: 'cat-emoji', 'aria-hidden': 'true' }, c.emoji),
+    h('span', { class: 'cat-name' }, c.name));
 
   return [
-    sheetHead(a.mode === 'edit' ? '記録を編集' : '記録する'),
+    sheetHead(a.mode === 'edit' ? '記録を編集' : '記録する', { onBack: closeAdd,
+      right: a.mode === 'edit' ? btn('🗑 削除', () => { closeSheet(); deleteTx(a.id); }, 'link-btn danger-link') : null }),
     h('div', { class: 'sheet-body' },
       a.mode === 'edit' ? typeToggle : null,
       h('button', { type: 'button', class: 'amount-small', onClick: () => { a.step = 1; refreshSheet(true); } },
         h('span', null, a.type === 'income' ? '収入' : '支出'), h('b', null, yen(amount)), h('span', { class: 'link' }, '金額を直す')),
       h('div', { class: 'opt' },
-        h('span', { class: 'opt-label', id: 'date-l' }, '日付'),
+        h('span', { class: 'opt-label', id: 'date-l' }, '日付', stickyDate && a.mode === 'new' && a.date !== today ? h('span', { class: 'muted' }, '（まとめ入力中：同じ日付を使います）') : null),
         h('div', { class: 'chip-row', role: 'group', 'aria-labelledby': 'date-l' },
-          dateChips.map(([d, l]) => h('button', { type: 'button', class: 'chip' + (a.date === d ? ' active' : ''), 'aria-pressed': a.date === d ? 'true' : 'false', onClick: () => { a.date = d; refreshSheet(); } }, l)),
+          dateChips.map(([d, l]) => h('button', { type: 'button', class: 'chip' + (a.date === d ? ' active' : ''), 'aria-pressed': a.date === d ? 'true' : 'false', onClick: () => setDate(d) }, l)),
           h('label', { class: 'chip date-chip' + (isOther ? ' active' : '') },
             h('span', null, isOther ? dayLabel(a.date) : '📅 他の日'),
-            h('input', { type: 'date', value: a.date, max: today, 'aria-label': '日付を選ぶ', onChange: (e) => { if (e.target.value) { a.date = e.target.value; refreshSheet(); } } })))),
-      h('div', { class: 'opt opt-inline' },
-        h('label', { class: 'field' }, h('span', null, '支払い方法'),
-          h('select', { onChange: (e) => { a.pay = e.target.value; } },
-            h('option', { value: '' }, '（指定なし）'),
-            S.pays.map((p) => h('option', { value: p.id, selected: a.pay === p.id }, p.name)))),
-        h('label', { class: 'field' }, h('span', null, 'メモ（なくてOK）'),
-          h('input', { type: 'text', maxlength: '100', value: a.memo, placeholder: '例：スーパー', enterkeyhint: 'done', onInput: (e) => { a.memo = e.target.value; } }))),
-      h('p', { class: 'step-hint' }, h('b', null, a.mode === 'edit' ? '' : 'ステップ2'), a.mode === 'edit' ? 'カテゴリをタップすると保存されます（今のカテゴリは枠つき）' : ' カテゴリをタップすると記録完了'),
-      h('div', { class: 'cat-grid' }, [...activeCats(a.type).filter((c) => !c.system), ...activeCats(a.type).filter((c) => c.system)].map((c) => h('button', { type: 'button', class: 'cat' + (a.cat === c.id ? ' selected' : '') + (c.system ? ' cat-later' : ''), onClick: () => chooseCat(c.id) },
-        h('span', { class: 'cat-emoji', 'aria-hidden': 'true' }, c.system ? '⏳' : c.emoji),
-        h('span', { class: 'cat-name' }, c.system ? 'あとで決める' : c.name)))),
+            h('input', { type: 'date', value: a.date, max: today, 'aria-label': '日付を選ぶ', onChange: (e) => { if (e.target.value) setDate(e.target.value); } })))),
+      h('details', { class: 'more-opts', open: a.mode === 'edit' || a.memo || null },
+        h('summary', null, 'メモ・支払い方法（なくてOK）'),
+        h('div', { class: 'opt opt-inline' },
+          h('label', { class: 'field' }, h('span', null, 'メモ'),
+            h('input', { type: 'text', maxlength: '100', value: a.memo, placeholder: '例：スーパー', enterkeyhint: 'done', onInput: (e) => { a.memo = e.target.value; } })),
+          h('label', { class: 'field' }, h('span', null, '支払い方法'),
+            h('select', { onChange: (e) => { a.pay = e.target.value; } },
+              h('option', { value: '' }, '（指定なし）'),
+              S.pays.map((p) => h('option', { value: p.id, selected: a.pay === p.id }, p.name)))),
+          a.type === 'expense' ? h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: a.waste, onChange: (e) => { a.waste = e.target.checked; } }), '😇 ムダ遣いだったかも') : null)),
       a.mode === 'edit' ? h('div', { class: 'edit-actions' },
-        btn('このまま保存', () => chooseCat(a.cat), 'btn btn-primary'),
+        btn('このまま保存', () => chooseCat(a.cat), 'btn btn-primary', { disabled: !a.cat }),
+        !a.cat ? h('p', { class: 'help' }, '種類を変えたので、下からカテゴリを選んでください') : null) : null,
+      h('p', { class: 'step-hint' }, a.mode === 'edit' ? 'カテゴリをタップでも保存できます' : 'カテゴリをタップすると記録完了'),
+      later ? h('button', { type: 'button', class: 'later-btn' + (a.cat === later.id ? ' selected' : ''), onClick: () => chooseCat(later.id) },
+        h('span', { 'aria-hidden': 'true' }, '⏳'), ' 迷ったら「あとで決める」') : null,
+      freq.length ? h('p', { class: 'opt-label' }, 'よく使う') : null,
+      freq.length ? h('div', { class: 'cat-grid' }, freq.map((id) => catBtn(catOf(id)))) : null,
+      freq.length ? h('p', { class: 'opt-label' }, 'すべて') : null,
+      h('div', { class: 'cat-grid' }, activeCats(a.type).filter((c) => !c.system).map(catBtn)),
+      a.mode === 'edit' ? h('div', { class: 'edit-actions' },
         btn('⭐ よく使うに追加', () => {
+          if (!a.cat || !validAmount(amount)) { toast('金額とカテゴリを確認してください'); return; }
           S.favs.push({ id: uid(), type: a.type, amount, cat: a.cat, memo: a.memo.trim(), pay: a.pay });
           addLog('create', 'fav', null, `よく使うに追加：${catOf(a.cat).name} ${yen(amount)}`);
           save(); render(); toast('ホームの「よく使う」に追加しました');
-        }, 'btn'),
-        btn('🗑 ゴミ箱へ', () => { closeSheet(); deleteTx(a.id); }, 'btn btn-danger-outline')) : null,
+        }, 'btn')) : null,
       hist.length ? h('details', { class: 'hist' },
         h('summary', null, `この記録の変更履歴（${hist.length}件）`),
         h('ul', null, hist.map((l) => h('li', null,
@@ -684,8 +847,9 @@ function viewReport() {
   const tot = monthTotals(S, ym);
   const cats = byCategory(S, ym, 'expense');
   const incs = byCategory(S, ym, 'income');
-  const maxCat = Math.max(1, ...cats.map((c) => c.amount), ...cats.map((c) => catOf(c.cat).budget || 0));
-  const budgetCats = S.cats.filter((c) => c.type === 'expense' && c.budget > 0 && !cats.some((x) => x.cat === c.id));
+  const budgetCats = S.cats.filter((c) => c.type === 'expense' && !c.archived && c.budget > 0 && !cats.some((x) => x.cat === c.id));
+  const maxCat = Math.max(1, ...cats.map((c) => c.amount), ...cats.map((c) => catOf(c.cat).budget || 0), ...budgetCats.map((c) => c.budget));
+  const waste = txOfMonth(S, ym).filter((t) => t.waste && t.type === 'expense').reduce((n, t) => n + t.amount, 0);
 
   const months = [];
   for (let i = 5; i >= 0; i--) { const m = ymAdd(ym, -i); months.push({ ym: m, ...monthTotals(S, m) }); }
@@ -695,13 +859,13 @@ function viewReport() {
     const c = catOf(catId);
     const bud = c.budget || 0;
     const over = bud > 0 && amount > bud;
-    return h('li', { class: 'bar-row' },
+    return h('li', null, h('button', { type: 'button', class: 'bar-row', onClick: () => go('list', null, { ym, cat: catId, type: 'all', q: '', onlyUncat: false }), 'aria-label': `${c.name} ${yen(amount)} の明細を見る` },
       h('div', { class: 'bar-label' }, h('span', null, `${c.emoji} ${c.name}`),
         h('span', null, h('b', null, yen(amount)), bud ? h('span', { class: 'bar-bud' + (over ? ' over' : '') }, over ? ` ⚠️ 予算${yen(bud)}を${yen(amount - bud)}超過` : ` ／ 予算${yen(bud)}`) : null,
           tot.expense ? h('span', { class: 'pct' }, ` ${Math.round((amount / tot.expense) * 100)}%`) : null)),
       h('div', { class: 'bar-track' },
         h('div', { class: 'bar-fill' + (over ? ' over' : ''), width: (amount / maxCat) * 100 + '%' }),
-        bud ? h('div', { class: 'bar-budget', 'aria-hidden': 'true' }) : null));
+        bud ? h('div', { class: 'bar-budget', 'aria-hidden': 'true' }) : null)));
   };
 
   const list = h('ul', { class: 'bars' }, [...cats.map((x) => barRow(x.cat, x.amount)), ...budgetCats.map((c) => barRow(c.id, 0))]);
@@ -710,7 +874,7 @@ function viewReport() {
     const all = [...cats.map((x) => x.cat), ...budgetCats.map((c) => c.id)];
     const bud = catOf(all[i]).budget;
     const line = row.querySelector('.bar-budget');
-    if (line && bud) line.style.left = `calc(${(bud / maxCat) * 100}% - 1px)`;
+    if (line && bud) line.style.left = `calc(${Math.min(100, (bud / maxCat) * 100)}% - 1px)`;
   });
 
   return [
@@ -725,7 +889,10 @@ function viewReport() {
         tot.expense > S.budget.monthly ? h('b', { class: 'minus' }, `（⚠️ ${yen(tot.expense - S.budget.monthly)} 超過）`) : null)) : null,
     h('section', { class: 'card' },
       h('h2', { class: 'card-title' }, '何に使った？（支出）'),
+      cats.length ? h('p', { class: 'help' }, 'タップすると明細が見られます') : null,
       cats.length || budgetCats.length ? list : h('p', { class: 'empty' }, 'この月の支出はありません')),
+    waste ? h('section', { class: 'card' },
+      h('p', null, '😇 ムダ遣いだったかも：', h('b', null, yen(waste)), tot.expense ? `（支出の${Math.round((waste / tot.expense) * 100)}%）` : '')) : null,
     incs.length ? h('section', { class: 'card' },
       h('h2', { class: 'card-title' }, '収入の内訳'),
       h('ul', { class: 'plain-list' }, incs.map((x) => h('li', null, h('span', null, `${catOf(x.cat).emoji} ${catOf(x.cat).name}`), h('b', null, yen(x.amount)))))) : null,
@@ -768,10 +935,10 @@ function viewSettings() {
     h('h2', { class: 'section-title' }, '安全・表示'),
     h('ul', { class: 'set-list' },
       row('🔒', 'パスコード・自動ロック', 'security', `${S.settings.autoLockMin}分`),
-      row('🎨', '画面の明るさ', 'theme'),
+      row('🎨', '表示テーマ（ライト・ダーク）', 'theme'),
       row('🛡', 'このアプリの安全性について', 'about'),
       row('⚠️', 'すべてのデータを消す', 'wipe')),
-    h('p', { class: 'help center' }, '家計簿 v1.0.0'),
+    h('p', { class: 'help center' }, '家計簿 v1.1.0'),
   ];
 }
 
@@ -897,8 +1064,17 @@ function templateSheet(kind, existing) {
           f.memo = f.memo.trim().slice(0, 100);
           if (existing) {
             const i = list.findIndex((x) => x.id === f.id);
-            addLog('update', kind, f.id, `${name}を変更：${f.memo || catOf(f.cat).name} ${yen(f.amount)}`, list[i], f);
+            addLog('update', kind, f.id, `${name}を変更：${f.memo || catOf(f.cat).name} ${yen(f.amount)}`);
+            // 停止→再開のときは、止めていた期間の分をまとめて記録しない（今月から再開）
+            if (isRec && !list[i].active && f.active) {
+              const prevYm = ymAdd(ymOf(dateStr()), -1);
+              f.lastYm = list[i].lastYm && list[i].lastYm > prevYm ? list[i].lastYm : prevYm;
+            }
             list[i] = { ...list[i], ...f };
+            if (isRec) {
+              const added = processRecurring(S);
+              for (const t of added) addLog('auto', 'tx', t.id, `固定費を自動記録：${txLabel(t)}`, null, t);
+            }
           } else {
             const item = isRec ? { ...f, startYm: ymOf(dateStr()), lastYm: recordNow ? null : ymOf(dateStr()) } : { id: f.id, type: f.type, amount: f.amount, cat: f.cat, memo: f.memo, pay: f.pay };
             if (isRec) { delete item.active; item.active = true; }
@@ -996,9 +1172,10 @@ function paySheet(p) {
         p ? btn('削除', () => {
           const i = S.pays.indexOf(p);
           S.pays.splice(i, 1);
-          addLog('delete', 'pay', p.id, `支払い方法を削除：${p.name}`, p, null);
+          if (S.settings.lastPay === p.id) S.settings.lastPay = null;
+          addLog('delete', 'pay', p.id, `支払い方法を削除：${p.name}`);
           save(); closeSheet(); render();
-          toast('削除しました', { label: '元に戻す', fn: () => { S.pays.splice(i, 0, p); addLog('undo', 'pay', p.id, `支払い方法の削除を取り消し：${p.name}`); save(); render(); } });
+          toast('削除しました', { label: '元に戻す', fn: () => { S.pays.splice(Math.min(i, S.pays.length), 0, p); addLog('undo', 'pay', p.id, `支払い方法の削除を取り消し：${p.name}`); save(); render(); } });
         }, 'btn btn-danger-outline') : null,
         btn('保存する', () => {
           name = name.trim().slice(0, 20);
@@ -1026,7 +1203,7 @@ function viewHistory() {
     h('p', { class: 'help pad' }, '追加・変更・削除はすべて記録されます。記録の「変更」をタップすると、変更前の内容に戻せます。'),
     h('div', { class: 'chip-row pad' }, chip('all', 'すべて'), chip('tx', '記録'), chip('rule', '設定'), chip('security', '安全')),
     list.length ? h('ul', { class: 'log-list' }, list.map((l) => {
-      const canRevert = l.kind === 'tx' && l.before && (l.act === 'update' || l.act === 'undo') && S.tx.some((t) => t.id === l.ref && !t.deleted);
+      const canRevert = l.kind === 'tx' && txFields(l.before) && (l.act === 'update' || l.act === 'undo') && S.tx.some((t) => t.id === l.ref && !t.deleted);
       const content = [h('span', { class: 'hist-time' }, fmtTime(l.at)), h('span', { class: 'log-act' }, actLabel(l.act)), h('span', { class: 'log-sum' }, l.summary || '')];
       return h('li', null, canRevert
         ? h('button', { type: 'button', class: 'log-item clickable', onClick: () => revertSheet(l) }, ...content, h('span', { class: 'chev' }, '›'))
@@ -1036,8 +1213,9 @@ function viewHistory() {
   ];
 }
 function revertSheet(l) {
-  const b = l.before;
+  const b = txFields(l.before);
   const t = S.tx.find((x) => x.id === l.ref);
+  if (!b || !t) { toast('この履歴からは戻せません'); return; }
   const desc = (x) => `${x.date} ／ ${x.type === 'income' ? '収入' : '支出'} ／ ${catOf(x.cat).name} ／ ${yen(x.amount)}${x.memo ? ' ／ ' + x.memo : ''}`;
   openSheet(() => [
     sheetHead('変更前に戻す'),
@@ -1047,7 +1225,7 @@ function revertSheet(l) {
       h('div', { class: 'btn-row' }, btn('やめる', () => closeSheet(), 'btn'),
         btn('変更前に戻す', () => {
           closeSheet();
-          updateTx(t.id, { type: b.type, amount: b.amount, cat: b.cat, date: b.date, memo: b.memo, pay: b.pay }, { verb: '変更前に戻しました' });
+          updateTx(t.id, b, { verb: '変更前に戻しました' });
         }, 'btn btn-primary'))),
   ]);
 }
@@ -1065,7 +1243,10 @@ function viewTrash() {
       const ok = await confirmSheet({ title: 'ゴミ箱を空にする', body: [`${list.length}件の記録を完全に削除します。元に戻せません。`], ok: '完全に削除', danger: true });
       if (!ok) return;
       const n = list.length;
+      const ids = new Set(list.map((t) => t.id));
       S.tx = S.tx.filter((t) => !t.deleted);
+      // 完全削除した記録の内容は履歴からも消す（件数のみ残す）
+      for (const l of S.log) if (l.ref && ids.has(l.ref)) { l.before = undefined; l.after = undefined; l.summary = '（完全削除された記録）'; }
       addLog('purge', 'tx', null, `ゴミ箱を空にしました（${n}件）`);
       save(); render(); toast('ゴミ箱を空にしました');
     }, 'btn btn-danger-outline btn-wide') : null,
@@ -1089,49 +1270,83 @@ function viewBackup() {
     subHead('バックアップ・書き出し'),
     h('section', { class: 'card' },
       h('h2', { class: 'card-title' }, '💾 バックアップを保存（おすすめ）'),
-      h('p', null, '全データを暗号化したファイルを作ります。「ファイル」アプリやiCloud Driveに保存してください。開くには今のパスコードが必要です。'),
+      h('p', null, '全データを暗号化したファイルを作ります。「ファイル」アプリやiCloud Driveに保存してください。'),
+      h('p', { class: 'help' }, 'ファイルは外に置くので、アプリのパスコードとは別の「バックアップ用パスワード（10文字以上）」で守ります。iPhoneの「パスワード」に保存しておくと安心です。'),
       h('p', { class: 'help' }, S.settings.lastBackupAt ? `前回のバックアップ：${fmtDate(S.settings.lastBackupAt)}` : 'まだバックアップしていません'),
-      btn('バックアップを保存', async () => {
-        const { iv, ct } = await encryptJSON(KEY, S);
-        const payload = { app: 'kakeibo-backup', v: 1, iter: META.iter, kind: META.kind, salt: b64e(META.salt), iv: b64e(iv), ct: b64e(ct), createdAt: Date.now() };
-        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-        const ok = await shareOrDownload(blob, `kakeibo-backup-${dateStr()}.json`);
-        if (ok) {
-          S.settings.lastBackupAt = Date.now();
-          addLog('backup', 'backup', null, '暗号化バックアップを作成しました');
-          save(); render(); toast('バックアップを作りました');
-        }
-      }, 'btn btn-primary')),
+      btn('バックアップを保存', backupFlow, 'btn btn-primary')),
     h('section', { class: 'card' },
       h('h2', { class: 'card-title' }, '📥 バックアップから復元'),
-      h('p', null, '今のデータはバックアップの内容に置き換わります。'),
+      h('p', null, '今のデータはバックアップの内容に置き換わります（直後なら取り消せます）。'),
       h('label', { class: 'btn file-btn' }, 'ファイルを選ぶ', h('input', { type: 'file', accept: 'application/json,.json', class: 'visually-hidden', onChange: (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importFlow(f); } }))),
     h('section', { class: 'card' },
       h('h2', { class: 'card-title' }, '📄 CSVで書き出す（Excel・Numbers用）'),
       h('p', { class: 'warn' }, '⚠️ CSVは暗号化されません。人に見られない場所に保存し、不要になったら消してください。'),
       btn('CSVを書き出す', async () => {
         const ok = await confirmSheet({ title: 'CSVを書き出す', body: ['暗号化されていないファイルになります。共有先に注意してください。'], ok: '書き出す' });
-        if (!ok) return;
+        if (!ok || !S) return;
         const blob = new Blob([toCSV(S)], { type: 'text/csv;charset=utf-8' });
-        if (await shareOrDownload(blob, `kakeibo-${dateStr()}.csv`)) {
+        if (await shareOrDownload(blob, `kakeibo-${dateStr()}.csv`) && S) {
           addLog('backup', 'backup', null, 'CSVを書き出しました（暗号化なし）');
           save();
         }
       }, 'btn')),
   ];
 }
+
+const BACKUP_MIN = 10;
+function backupFlow() {
+  let p1 = '', p2 = '', err = '', busy = false;
+  openSheet(() => [
+    sheetHead('バックアップ用パスワード'),
+    h('form', { class: 'sheet-body', onSubmit: async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      if (p1.length < BACKUP_MIN) err = `${BACKUP_MIN}文字以上にしてください`;
+      else if (/^\d+$/.test(p1)) err = '数字だけだと推測されやすいので、英字もまぜてください';
+      else if (p1 !== p2) err = '2回の入力が違います';
+      else err = '';
+      if (err) { refreshSheet(); return; }
+      busy = true; refreshSheet();
+      const salt = randomBytes(16);
+      const key = await deriveKey(p1, salt, PBKDF2_ITER);
+      if (!S) return;
+      const { iv, ct } = await encryptJSON(key, S, 'backup');
+      const payload = { app: 'kakeibo-backup', v: 2, iter: PBKDF2_ITER, salt: b64e(salt), iv: b64e(iv), ct: b64e(ct), createdAt: Date.now() };
+      closeSheet();
+      const ok = await shareOrDownload(new Blob([JSON.stringify(payload)], { type: 'application/json' }), `kakeibo-backup-${dateStr()}.json`);
+      if (ok && S) {
+        S.settings.lastBackupAt = Date.now();
+        addLog('backup', 'backup', null, '暗号化バックアップを作成しました');
+        save(); render(); toast('バックアップを作りました');
+      }
+    } },
+    h('input', { type: 'text', name: 'username', autocomplete: 'username', value: '家計簿バックアップ', class: 'visually-hidden', tabindex: '-1', 'aria-hidden': 'true' }),
+    h('p', { class: 'help' }, `英字をまぜて${BACKUP_MIN}文字以上。復元するときに必要です。忘れると復元できません。`),
+    h('label', { class: 'field' }, h('span', null, 'バックアップ用パスワード'),
+      h('input', { type: 'password', autocomplete: 'new-password', value: p1, onInput: (e) => { p1 = e.target.value; } })),
+    h('label', { class: 'field' }, h('span', null, 'もう一度'),
+      h('input', { type: 'password', autocomplete: 'new-password', value: p2, onInput: (e) => { p2 = e.target.value; } })),
+    err ? h('p', { class: 'error', role: 'alert' }, err) : null,
+    h('button', { type: 'submit', class: 'btn btn-primary', disabled: busy }, busy ? '暗号化しています…' : '保存する')),
+  ]);
+}
+
 async function importFlow(file) {
   if (file.size > 20 * 1024 * 1024) { toast('ファイルが大きすぎます'); return; }
   let payload;
   try {
     payload = JSON.parse(await file.text());
-    if (payload.app !== 'kakeibo-backup' || payload.v !== 1) throw new Error();
+    if (payload.app !== 'kakeibo-backup' || payload.v !== 2) throw new Error();
+    if (typeof payload.salt !== 'string' || typeof payload.iv !== 'string' || typeof payload.ct !== 'string') throw new Error();
   } catch { toast('この家計簿のバックアップファイルではありません'); return; }
+  const iter = Number(payload.iter);
+  if (!Number.isInteger(iter) || iter < 100000 || iter > 10000000) { toast('バックアップファイルの形式が正しくありません'); return; }
+  const created = Number(payload.createdAt) || 0;
   let pass = '';
   let err = '';
   let busy = false;
   openSheet(() => {
-    const input = h('input', { type: 'password', autocomplete: 'off', inputmode: payload.kind === 'pin' ? 'numeric' : 'text', value: pass, onInput: (e) => { pass = e.target.value; } });
+    const input = h('input', { type: 'password', autocomplete: 'current-password', value: pass, onInput: (e) => { pass = e.target.value; } });
     setTimeout(() => input.focus(), 50);
     return [
       sheetHead('バックアップから復元'),
@@ -1141,19 +1356,21 @@ async function importFlow(file) {
         busy = true; err = ''; refreshSheet();
         let data;
         try {
-          const key = await deriveKey(pass, b64d(payload.salt), Number(payload.iter) || PBKDF2_ITER);
-          data = sanitizeState(await decryptJSON(key, { iv: b64d(payload.iv), ct: b64d(payload.ct) }));
-        } catch { busy = false; err = 'パスコードが違うか、ファイルが壊れています'; refreshSheet(); return; }
+          const key = await deriveKey(pass, b64d(payload.salt), iter);
+          data = sanitizeState(await decryptJSON(key, { iv: b64d(payload.iv), ct: b64d(payload.ct) }, 'backup'));
+        } catch { busy = false; err = 'パスワードが違うか、ファイルが壊れています'; refreshSheet(); return; }
+        if (!S) return;
         closeSheet();
-        const ok = await confirmSheet({ title: '置き換えますか？', body: [`バックアップ（${fmtDate(payload.createdAt)}作成・記録${data.tx.filter((t) => !t.deleted).length}件）で、今のデータ（記録${liveTx(S).length}件）を置き換えます。`], ok: '置き換える', danger: true });
-        if (!ok) return;
+        const ok = await confirmSheet({ title: '置き換えますか？', body: [`バックアップ（${created ? fmtDate(created) : '日付不明'}作成・記録${data.tx.filter((t) => !t.deleted).length}件）で、今のデータ（記録${liveTx(S).length}件）を置き換えます。`], ok: '置き換える', danger: true });
+        if (!ok || !S) return;
         const prev = S;
         S = data;
-        addLog('import', 'backup', null, `バックアップ（${fmtDate(payload.createdAt)}作成）から復元しました`);
+        addLog('import', 'backup', null, `バックアップ（${created ? fmtDate(created) : '日付不明'}作成）から復元しました`);
         save(); render();
         toast('復元しました', { label: '取り消す', fn: () => { S = prev; addLog('undo', 'backup', null, '復元を取り消しました'); save(); render(); } });
       } },
-      h('label', { class: 'field' }, h('span', null, 'バックアップを作ったときのパスコード'), input),
+      h('input', { type: 'text', name: 'username', autocomplete: 'username', value: '家計簿バックアップ', class: 'visually-hidden', tabindex: '-1', 'aria-hidden': 'true' }),
+      h('label', { class: 'field' }, h('span', null, 'バックアップ用パスワード'), input),
       err ? h('p', { class: 'error', role: 'alert' }, err) : null,
       h('button', { type: 'submit', class: 'btn btn-primary', disabled: busy }, busy ? '確認中…' : '開く')),
     ];
@@ -1161,34 +1378,52 @@ async function importFlow(file) {
 }
 
 // ---- パスコード・自動ロック ----
+async function canOpenWith(key) {
+  for (const k of ['vault', 'vault_prev']) {
+    try { const v = await db.get(k); if (v) { await decryptJSON(key, v); return true; } } catch { /* 次へ */ }
+  }
+  return false;
+}
 function viewSecurity() {
-  let cur = '', p1 = '', p2 = '', kind = META.kind, err = '', busy = false;
+  let cur = '', p1 = '', p2 = '', kind = META.kind, busy = false;
   const status = h('p', { class: 'status', 'aria-live': 'polite' });
   const errEl = h('p', { class: 'error', role: 'alert' });
   const form = h('form', { class: 'card', onSubmit: async (e) => {
     e.preventDefault();
     if (busy) return;
-    err = '';
-    if (p1.length < 6) err = '新しいパスコードは6文字以上にしてください';
-    else if (kind === 'pin' && !/^\d+$/.test(p1)) err = '数字だけで入力してください（英数字にする場合は下で切り替え）';
-    else if (p1 !== p2) err = '新しいパスコードが2回で違います';
+    const err = passProblem(p1, kind) || (p1 !== p2 ? '新しいパスコードが2回で違います' : '');
     errEl.textContent = err;
     if (err) return;
-    busy = true; status.textContent = '確認中…';
+    busy = true;
+    document.body.classList.add('busy'); // 処理中は操作させない（途中で保存が割り込むのを防ぐ）
+    status.textContent = '確認中…';
     try {
       const curKey = await deriveKey(cur, META.salt, META.iter);
-      await decryptJSON(curKey, await db.get('vault'));
-    } catch { busy = false; status.textContent = ''; errEl.textContent = '今のパスコードが違います'; return; }
-    status.textContent = '暗号化し直しています…';
-    await saveChain;
-    const salt = randomBytes(16);
-    const key = await deriveKey(p1, salt, PBKDF2_ITER);
-    addLog('security', 'security', null, 'パスコードを変更しました');
-    const { iv, ct } = await encryptJSON(key, S);
-    const meta = { ...META, salt, iter: PBKDF2_ITER, kind };
-    await db.atomic({ meta, vault: { iv, ct, savedAt: Date.now() } }, ['vault_prev']);
-    META = meta; KEY = key;
-    render(); toast('パスコードを変更しました。古いバックアップは古いパスコードで開けます');
+      if (!(await canOpenWith(curKey))) { errEl.textContent = '今のパスコードが違います'; status.textContent = ''; return; }
+      status.textContent = '暗号化し直しています…';
+      const salt = randomBytes(16);
+      const key = await deriveKey(p1, salt, PBKDF2_ITER);
+      // 保存の順番待ちの列に入れて、ほかの保存と絶対に重ならないようにする
+      const job = saveChain.then(async () => {
+        if (!S) throw new Error('locked');
+        addLog('security', 'security', null, 'パスコードを変更しました');
+        const { iv, ct } = await encryptJSON(key, S);
+        const meta = { ...META, salt, iter: PBKDF2_ITER, kind };
+        const rev = REV + 1;
+        await db.atomic({ meta, vault: { iv, ct, savedAt: Date.now(), rev } }, ['vault_prev']);
+        META = meta; KEY = key; REV = rev;
+      });
+      saveChain = job.catch(() => {});
+      await job;
+      render(); toast('パスコードを変更しました');
+    } catch (ex) {
+      console.error(ex);
+      errEl.textContent = '変更できませんでした。もう一度お試しください';
+      status.textContent = '';
+    } finally {
+      busy = false;
+      document.body.classList.remove('busy');
+    }
   } },
   h('h2', { class: 'card-title' }, 'パスコードを変える'),
   h('input', { type: 'text', name: 'username', autocomplete: 'username', value: '家計簿', class: 'visually-hidden', tabindex: '-1', 'aria-hidden': 'true' }),
@@ -1198,21 +1433,21 @@ function viewSecurity() {
   h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: kind === 'text', onChange: (e) => {
     kind = e.target.checked ? 'text' : 'pin';
     form.querySelectorAll('#np1,#np2').forEach((i) => i.setAttribute('inputmode', kind === 'pin' ? 'numeric' : 'text'));
-  } }), '英数字のパスコードにする'),
+  } }), '英数字のパスコードにする（より安全）'),
   errEl, status,
   h('button', { type: 'submit', class: 'btn btn-primary' }, '変更する'));
 
   return [
     subHead('パスコード・自動ロック'),
     h('section', { class: 'card' },
-      h('h2', { class: 'card-title' }, '自動ロックまでの時間'),
-      h('p', { class: 'help' }, '操作しない時間、またはアプリを閉じてからこの時間がたつとロックします。'),
-      h('div', { class: 'chip-row' }, [1, 3, 5, 10, 30].map((m) => h('button', { type: 'button', class: 'chip' + (S.settings.autoLockMin === m ? ' active' : ''), 'aria-pressed': S.settings.autoLockMin === m ? 'true' : 'false',
-        onClick: () => { S.settings.autoLockMin = m; addLog('update', 'security', null, `自動ロックを${m}分に変更`); save(); resetIdle(); render(); } }, `${m}分`)))),
-    form,
+      btn('🔒 今すぐロック', () => lock(), 'btn'),
+      h('p', { class: 'help' }, '💡 iPhoneの「パスワード」に保存しておくと、ロック画面でFace IDを使って入力できます。')),
     h('section', { class: 'card' },
-      h('p', { class: 'help' }, '💡 iPhoneの「パスワード」に保存しておくと、Face IDで入力できます（ロック画面で候補が出ます）。'),
-      btn('🔒 今すぐロック', () => lock(), 'btn')),
+      h('h2', { class: 'card-title' }, '自動ロックまでの時間'),
+      h('p', { class: 'help' }, '操作しない時間、またはアプリを閉じてからこの時間がたつとロックします。短いほど安全、長いほどラクです。'),
+      h('div', { class: 'chip-row' }, LOCK_OPTIONS.map((m) => h('button', { type: 'button', class: 'chip' + (S.settings.autoLockMin === m ? ' active' : ''), 'aria-pressed': S.settings.autoLockMin === m ? 'true' : 'false',
+        onClick: () => { S.settings.autoLockMin = m; addLog('update', 'security', null, `自動ロックを${m}分に変更`); save(); resetIdle(); render(); } }, m === 60 ? '1時間' : `${m}分`)))),
+    form,
   ];
 }
 
@@ -1228,7 +1463,7 @@ function applyTheme(t) {
 function viewTheme() {
   const cur = document.documentElement.dataset.theme || 'auto';
   return [
-    subHead('画面の明るさ'),
+    subHead('表示テーマ'),
     h('div', { class: 'chip-row pad' }, [['auto', '端末に合わせる'], ['light', 'ライト'], ['dark', 'ダーク']].map(([id, l]) => h('button', {
       type: 'button', class: 'chip' + (cur === id ? ' active' : ''), 'aria-pressed': cur === id ? 'true' : 'false',
       onClick: async () => { applyTheme(id); await db.put('prefs', { theme: id }); render(); },
@@ -1242,8 +1477,10 @@ function viewAbout() {
     ['🔒 強い暗号化', 'パスコードから鍵を作り（PBKDF2 60万回）、AES-256-GCMで暗号化して保存します。改ざんされると開けなくなるので気づけます。'],
     ['🧠 鍵はメモリの中だけ', 'パスコードや鍵は保存しません。ロックすると、画面とメモリからデータを消します。'],
     ['⏱ 自動ロック', `${S.settings.autoLockMin}分操作がない、またはアプリを閉じて${S.settings.autoLockMin}分たつとロックします。`],
-    ['🚫 総当たり対策', 'パスコードを5回間違えると、待ち時間が段々長くなります。間違いがあったことは次回お知らせします。'],
-    ['🧱 外部ファイルを読み込まない', 'コンテンツセキュリティポリシーで、アプリ以外のスクリプトや通信を禁止しています。'],
+    ['🚫 総当たり対策', 'このアプリの画面では、パスコードを5回間違えると待ち時間が段々長くなり、間違いがあったことを次回お知らせします。（端末そのものを盗まれた場合に備え、iPhone本体のパスコードも必ず設定してください）'],
+    ['💾 バックアップは別パスワード', 'iCloudなど外に置くファイルなので、10文字以上のバックアップ用パスワードで暗号化します。'],
+    ['🙈 のぞき見対策', 'アプリを切り替えるときは画面を隠し、アプリ切り替え画面に金額が写らないようにしています。'],
+    ['🧱 外部ファイルを読み込まない', 'コンテンツセキュリティポリシーで、アプリ以外のスクリプトや通信を禁止しています。他のサイトの中に埋め込まれた場合は表示しません。'],
     ['⚠️ 注意してほしいこと', 'パスコードを忘れると復元できません。定期的にバックアップしてください。CSVは暗号化されません。'],
   ];
   return [subHead('このアプリの安全性'), h('ul', { class: 'about-list' }, items.map(([t, d]) => h('li', { class: 'card' }, h('h2', { class: 'card-title' }, t), h('p', null, d))))];
@@ -1268,7 +1505,7 @@ function isStandalone() { return navigator.standalone === true || matchMedia('(d
 
 // キーボード入力（PC・外部キーボード用）
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && sheetEl) { closeSheet(); return; }
+  if (e.key === 'Escape' && sheetEl) { dismissSheet(); return; }
   if (addState && addState.step === 1 && sheetEl && !e.target.matches('input,select,textarea')) {
     if (/^\d$/.test(e.key)) pressKey(e.key);
     else if (e.key === 'Backspace') pressKey('⌫');
